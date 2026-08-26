@@ -1,0 +1,33 @@
+{
+  "$schema": "https://eips.ethereum.org/assets/eip-7730/erc7730-v2.schema.json",
+  "$comment": "Pre-deployment ERC-7730 v2 template. Add the frozen v1.0.0 singleton deployments after Sourcify verification. The EIP-712 domain is also constrained by name and version.",
+  "context": {
+    "$id": "runtime-lockdown-v1-eip712",
+    "eip712": {
+      "domain": {
+        "name": "RuntimeLockdown",
+        "version": "1.0.0"
+      },
+      "deployments": []
+    }
+  },
+  "metadata": {
+    "owner": "Runtime Capital",
+    "contractName": "LockdownTimelock",
+    "info": {
+      "url": "https://runtime.capital"
+    }
+  },
+  "display": {
+    "formats": {
+      "Lockdown(address safe,bytes32 reasonHash)": {
+        "intent": "Authorize Safe lockdown",
+        "interpolatedIntent": "Lock down Safe {safe}",
+        "fields": [
+          { "path": "#.safe", "label": "Safe to lock down", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.reasonHash", "label": "Incident reason hash", "format": "raw" }
+        ]
+      }
+    }
+  }
+}

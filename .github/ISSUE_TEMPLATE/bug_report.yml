@@ -1,0 +1,33 @@
+name: Bug report
+description: A reproducible defect in the contracts, tests, scripts, or documentation.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        **Do not use this form for security vulnerabilities.** Report those
+        privately through GitHub security advisories or `contact@runtime.capital`.
+        See `SECURITY.md`.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or tag
+      description: The exact commit SHA or release tag you are reporting against.
+      placeholder: v1.0.0-rc.1
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        A failing `forge test` case is ideal. Otherwise, the exact commands and
+        environment (`forge --version`, OS).
+    validations:
+      required: true

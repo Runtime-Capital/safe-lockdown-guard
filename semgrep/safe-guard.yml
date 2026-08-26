@@ -1,0 +1,42 @@
+rules:
+  - id: safe-lockdown-no-low-level-delegatecall
+    languages: [solidity]
+    severity: ERROR
+    message: "Lockdown must not issue low-level delegatecall."
+    patterns:
+      - pattern-either:
+          - pattern: $X.delegatecall(...)
+          - pattern: delegatecall(...)
+
+  - id: safe-lockdown-no-selfdestruct
+    languages: [solidity]
+    severity: ERROR
+    message: "Lockdown must not contain selfdestruct."
+    pattern-either:
+      - pattern: selfdestruct(...)
+      - pattern: suicide(...)
+
+  - id: safe-lockdown-no-tx-origin
+    languages: [solidity]
+    severity: ERROR
+    message: "Do not use tx.origin for Safe guard authorization."
+    pattern: tx.origin
+
+  - id: safe-lockdown-no-refund-transfer
+    languages: [solidity]
+    severity: ERROR
+    message: "Guard code must not transfer funds to refundReceiver."
+    patterns:
+      - pattern-either:
+          - pattern: refundReceiver.transfer(...)
+          - pattern: refundReceiver.send(...)
+          - pattern: refundReceiver.call(...)
+
+  - id: safe-lockdown-no-owner-set-degradation-in-recovery
+    languages: [solidity]
+    severity: WARNING
+    message: "Recovery should not whitelist addOwner/removeOwner/changeThreshold selectors."
+    pattern-either:
+      - pattern: ADD_OWNER_SELECTOR
+      - pattern: REMOVE_OWNER_SELECTOR
+      - pattern: CHANGE_THRESHOLD_SELECTOR

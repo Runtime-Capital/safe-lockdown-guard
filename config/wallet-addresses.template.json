@@ -1,0 +1,29 @@
+{
+  "description": "Copy this file to wallet-addresses.local.json for local deployment drills. Do not commit real owner, lockdown signer, recovery, or Safe addresses.",
+  "networks": {
+    "ethereum": {
+      "testSafe": "0x0000000000000000000000000000000000000000"
+    },
+    "base": {
+      "testSafe": "0x0000000000000000000000000000000000000000"
+    }
+  },
+  "owners": [
+    {
+      "label": "Owner 1",
+      "address": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "label": "Owner 2",
+      "address": "0x0000000000000000000000000000000000000000"
+    }
+  ],
+  "threshold": 2,
+  "extraLockdownSigners": [],
+  "recoveryOwners": [
+    {
+      "label": "Cold backup 1",
+      "address": "0x0000000000000000000000000000000000000000"
+    }
+  ]
+}

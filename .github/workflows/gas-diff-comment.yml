@@ -1,0 +1,53 @@
+name: Post Gas Diff Comment
+
+# Fork-safe companion to the `gas-diff` job in ci.yml. It runs in the base-repo
+# context (so it HAS a write token even for fork PRs), downloads the artifact
+# that job uploaded, and posts/updates a single sticky comment on the PR.
+#
+# Note: `workflow_run` always uses the workflow file from the DEFAULT branch, so
+# the sticky comment starts working only from the first PR opened AFTER this
+# lands on main. On the PR that introduces it, only the `gas-diff` generation
+# job (in ci.yml) runs and can be validated from its logs/artifact.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Download gas diff artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gas-diff
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read PR number
+        id: pr
+        run: echo "number=$(cat pr-number.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Read gas diff
+        id: gas_diff
+        run: |
+          if [ -f comment.md ] && [ -s comment.md ]; then
+            {
+              echo "markdown<<__GASDIFF_EOF__"
+              cat comment.md
+              echo "__GASDIFF_EOF__"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add gas diff to sticky comment
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2.9.4
+        with:
+          number: ${{ steps.pr.outputs.number }}
+          # No diff (e.g. no gas change) => remove any stale comment.
+          delete: ${{ !steps.gas_diff.outputs.markdown }}
+          message: ${{ steps.gas_diff.outputs.markdown }}

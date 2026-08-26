@@ -1,0 +1,17 @@
+#!/bin/sh
+# Check formatting before each commit with `forge fmt --check`. Files are NOT
+# modified; if anything is mis-formatted the commit is aborted so you can run
+# `forge fmt` and re-stage manually.
+#
+# This hook is tracked in the repo under .githooks/. Enable it once per clone
+# with `make hooks` (sets core.hooksPath = .githooks).
+
+command -v forge >/dev/null 2>&1 || {
+    echo "pre-commit: forge not found in PATH; skipping forge fmt --check" >&2
+    exit 0
+}
+
+forge fmt --check || {
+    echo "pre-commit: forge fmt --check failed. Run 'forge fmt' and re-stage." >&2
+    exit 1
+}

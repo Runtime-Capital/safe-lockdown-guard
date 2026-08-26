@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/Runtime-Capital/safe-lockdown-guard/security/advisories/new
+    about: >-
+      Never open a public issue for a vulnerability in this contract. Use GitHub
+      private vulnerability reporting, or email contact@runtime.capital. See
+      SECURITY.md.

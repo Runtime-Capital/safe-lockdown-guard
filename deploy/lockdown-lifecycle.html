@@ -1,0 +1,2148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>safe-lockdown v1.0.0 lifecycle helper</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0c0f14;
+      --panel: #151922;
+      --panel-2: #10141b;
+      --text: #eef3fb;
+      --muted: #a8b2c1;
+      --line: #303846;
+      --green: #4ade80;
+      --yellow: #facc15;
+      --red: #fb7185;
+      --blue: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: rgba(12, 15, 20, 0.94);
+      border-bottom: 1px solid var(--line);
+      padding: 18px 24px;
+      backdrop-filter: blur(8px);
+    }
+    h1 { margin: 0 0 4px; font-size: 24px; }
+    h2 { margin: 0 0 6px; font-size: 18px; }
+    h3 { margin: 16px 0 8px; font-size: 15px; }
+    p { color: var(--muted); margin: 6px 0; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px;
+    }
+    nav, section, .output {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    nav { position: sticky; top: 84px; align-self: start; padding: 12px; max-height: calc(100vh - 100px); overflow:auto; }
+    nav a {
+      display: block;
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    nav a:hover { background: var(--panel-2); }
+    nav .step { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 4px 10px; }
+    .stack { display: grid; gap: 16px; }
+    section { padding: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+    input, textarea, select {
+      width: 100%;
+      min-width: 0;
+      padding: 10px 11px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    textarea { min-height: 86px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-weight: 700;
+      background: var(--green);
+      color: #06110a;
+      cursor: pointer;
+    }
+    button.secondary { background: #2b3240; color: var(--text); border: 1px solid var(--line); }
+    button.primary { background: var(--blue); color: #04101f; }
+    button.warn { background: var(--yellow); color: #171207; }
+    button.danger { background: var(--red); color: #23060c; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; background: #243244; color: var(--muted); font-size: 12px; }
+    .badge { display:inline-block; min-width: 22px; text-align:center; padding: 2px 7px; border-radius: 999px; background: var(--blue); color:#04101f; font-weight:800; font-size:12px; margin-right:8px; }
+    .warnbox { border-left: 3px solid var(--yellow); padding: 10px 12px; background: #241e10; border-radius: 6px; color: #f6df8a; }
+    .dangerbox { border-left: 3px solid var(--red); padding: 10px 12px; background: #261018; border-radius: 6px; color: #ffd0d8; }
+    .okbox { border-left: 3px solid var(--green); padding: 10px 12px; background: #0f1f15; border-radius: 6px; color: #bff3d2; }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #dbeafe;
+    }
+    .output { padding: 14px; margin-top: 12px; background: #090c12; }
+    .small { font-size: 12px; color: var(--muted); }
+    .sectitle { display:flex; align-items:center; }
+    code { background:#0b1320; padding:1px 5px; border-radius:4px; }
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+      nav { position: static; max-height:none; }
+      .grid, .grid-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>safe-lockdown v1.0.0 lifecycle helper</h1>
+    <p>Public static helper for the v1.0.0 <strong>singleton</strong> (one deployed contract serves every Safe). No private addresses are embedded. Review every field before signing.</p>
+  </header>
+  <main>
+    <nav>
+      <div class="step">Setup</div>
+      <a href="#network">0 · Network &amp; manifest</a>
+      <a href="#diagnostic">1 · Diagnose Safe</a>
+      <div class="step">Deploy (once per chain)</div>
+      <a href="#infra-deploy">2 · Deploy singleton &amp; verifiers</a>
+      <div class="step">Per-Safe install</div>
+      <a href="#init">3 · Build initialize()</a>
+      <a href="#install">4 · Preflight &amp; install guards</a>
+      <div class="step">Arm</div>
+      <a href="#verifiers">5 · Verifiers &amp; panic signers</a>
+      <a href="#timelock">6 · Timelock (anti-coercion)</a>
+      <a href="#params">6b · Admin parameters</a>
+      <div class="step">Operate</div>
+      <a href="#trigger">7 · Trigger lockdown (EIP-712)</a>
+      <a href="#state">8 · State &amp; timers</a>
+      <a href="#recovery">9 · Recovery operations</a>
+      <a href="#janitor">10 · Tickets &amp; janitor</a>
+      <a href="#builder">Last generated transaction</a>
+    </nav>
+
+    <div class="stack">
+      <div class="warnbox" id="reworkBanner">
+        This builder targets the ERC-7913 <strong>bytes-identity</strong> signer model. Automated browser
+        smoke tests cover the no-wallet builders, mocked-RPC preflight, and the EIP-712 wallet path, but
+        <strong>NOT</strong> a live chain, a real wallet, or the pinned-codehash flow. Verify a dry-run
+        against a testnet Safe before any production use, and confirm the generated calldata independently.
+      </div>
+      <!-- ============================ 0 NETWORK ============================ -->
+      <section id="network">
+        <div class="sectitle"><span class="badge">0</span><h2>Network, manifest &amp; trust roots</h2></div>
+        <div class="grid-3">
+          <label>Network preset
+            <select id="networkPreset">
+              <option value="1">Ethereum mainnet</option>
+              <option value="8453">Base mainnet</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label>Chain ID
+            <input id="chainId" value="1" />
+          </label>
+          <label>Read-only RPC URL
+            <input id="readRpcUrl" value="https://ethereum.publicnode.com" />
+          </label>
+        </div>
+        <p class="small">The presets are development conveniences, not the support matrix. v1.0.0 launches on Ethereum mainnet; a future network is supported only after it is added to the final manifest with canonical Safe v1.5.0 + Transaction Service support and completed per-chain codehash/source/operator checks.</p>
+        <div class="grid">
+          <label>Lockdown singleton (v1.0.0, per chain)
+            <input id="singleton" placeholder="0x... from deploy/manifest.json" />
+          </label>
+          <label>MultiSendCallOnly (canonical Safe v1.5.0)
+            <input id="multiSendCallOnly" value="0xA83c336B20401Af773B6219BA5027174338D1836" />
+          </label>
+          <label>Safe v1.5.0 singleton (masterCopy expected)
+            <input id="safeSingleton" value="0xFf51A5898e281Db6DfC7855790607438dF2ca44b" />
+          </label>
+          <label>SafeProxyFactory
+            <input id="safeFactory" value="0x14F2982D601c9458F93bd70B218933A6f8165e7b" />
+          </label>
+          <label>LockdownFallbackHandler
+            <input id="fallbackHandler" placeholder="0x... from deploy/manifest.json" />
+          </label>
+        </div>
+        <h3>Trust roots (secure-by-default codehash pinning, mirrors verify-install-v1.sh)</h3>
+        <div class="warnbox">
+          A same-address fake singleton can spoof <code>VERSION()</code> and <code>supportsInterface()</code>. The install preflight
+          binds <code>EXTCODEHASH</code> and <strong>FAILs</strong> if an expected hash is missing, unless you tick "allow unpinned".
+          Load <code>deploy/manifest.json</code> to resolve hashes by chain ID.
+        </div>
+        <div class="grid">
+          <label>Expected singleton codehash
+            <input id="expSingletonCodehash" placeholder="0x... 32-byte EXTCODEHASH" />
+          </label>
+          <label>Expected MultiSendCallOnly codehash
+            <input id="expMultiSendCodehash" placeholder="0x..." />
+          </label>
+          <label>Expected LockdownFallbackHandler codehash
+            <input id="expFallbackHandlerCodehash" placeholder="0x..." />
+          </label>
+          <label>Expected PasswordVerifier codehash (chain-invariant build)
+            <input id="expPasswordVerifierCodehash" placeholder="0x..." />
+          </label>
+          <label>Expected WebAuthnVerifier codehash (policy-specific build)
+            <input id="expWebAuthnVerifierCodehash" placeholder="0x..." />
+          </label>
+          <label>Load manifest JSON
+            <input id="manifestFile" type="file" accept=".json,application/json" />
+          </label>
+        </div>
+        <label style="margin-top:10px"><span><input type="checkbox" id="allowUnpinned" style="width:auto" /> Allow unpinned codehash (dev/test only - downgrades FAIL to WARN)</span></label>
+        <div class="actions">
+          <button class="secondary" id="loadManifest" title="Loads ../deploy/manifest.json when served over localhost and fills singleton / verifier / MultiSend addresses and codehashes for the current Chain ID.">Load default manifest</button>
+          <button id="connect" title="Connect only for direct on-chain deployments or a direct triggerLockdown. Read-only checks use the RPC URL.">Connect signing wallet</button>
+          <button class="secondary" id="switchNetwork" title="Ask the connected wallet to switch to the Chain ID shown above.">Switch wallet network</button>
+        </div>
+        <p class="small" id="walletStatus">Wallet not connected.</p>
+        <p class="small" id="walletHelp">Read-only diagnostics do not require a wallet. Signing actions require an injected wallet and usually need this page served over http://127.0.0.1, not file://.</p>
+        <div class="output"><pre id="networkOut">No manifest loaded.</pre></div>
+      </section>
+
+      <!-- ============================ 1 DIAGNOSE ============================ -->
+      <section id="diagnostic">
+        <div class="sectitle"><span class="badge">1</span><h2>Diagnose existing Safe</h2></div>
+        <p>Always start here for an existing Safe, repeat this check before relying on the panic path, and monitor the same fields between operator sessions. Reads Safe version + masterCopy, guard, module guard, fallback handler, whether the singleton is installed, the per-Safe v1.0.0 config snapshot, timelock delay, signer count and lifecycle state. Repair any slot mismatch while the Safe is cold; triggerLockdown deliberately freezes whatever remains covered instead of rejecting degraded protection.</p>
+        <label>Safe address to diagnose
+          <input id="diagSafe" placeholder="0x..." />
+        </label>
+        <div class="actions">
+          <button class="primary" id="diagnoseSafe" title="Read-only. Resolves everything needed to decide the next step and prefills the panels below.">Run diagnostic</button>
+          <button class="secondary" id="diagGoInit" title="Open the initialize() builder with this Safe prefilled.">Prepare initialize()</button>
+          <button class="secondary" id="diagGoInstall" title="Open the guard installation panel.">Open guard installation</button>
+        </div>
+        <div class="output"><pre id="diagnosticOut">No diagnostic run yet.</pre></div>
+      </section>
+
+      <!-- ============================ 2 INFRA DEPLOY ============================ -->
+      <section id="infra-deploy">
+        <div class="sectitle"><span class="badge">2</span><h2>Deploy singleton &amp; verifiers (once per chain)</h2></div>
+        <div class="warnbox">
+          In v1.0.0 you do <strong>not</strong> deploy a Lockdown per Safe. The singleton is deployed once per chain and serves every Safe.
+          Only use this panel if the manifest has no deployed address for this chain. Prefer the audited addresses from
+          <code>deploy/manifest.json</code>. After deploying, read the codehash on-chain and record it in the manifest.
+        </div>
+        <p>Uses the Foundry build artifacts from this repo. Run <code>forge build</code> first. The buttons load them automatically when served over localhost.</p>
+        <div class="grid">
+          <label>Lockdown creation bytecode (optional, uses artifact if empty)
+            <textarea id="singletonBytecode" placeholder="0x..."></textarea>
+          </label>
+          <label>PasswordVerifier creation bytecode (optional)
+            <textarea id="passwordVerifierBytecode" placeholder="0x..."></textarea>
+          </label>
+          <label>WebAuthnVerifier creation bytecode (optional, overrides the selected UV policy build)
+            <textarea id="webauthnVerifierBytecode" placeholder="0x..."></textarea>
+          </label>
+          <label>WebAuthnVerifier UV policy (selects which contract is deployed)
+            <select id="deployWebAuthnRequireUV"><option value="false">UP only - WebAuthnVerifierNoUV (recommended for duress)</option><option value="true">Require UV flag - WebAuthnVerifier</option></select>
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="loadArtifacts" title="Loads ../out/*.json for Lockdown and all bundled verifiers, including both WebAuthn UV-policy variants.">Load Foundry artifacts</button>
+          <button class="warn" id="deployPasswordVerifier" title="Deploys PasswordVerifier (no constructor args).">Deploy PasswordVerifier</button>
+          <button class="warn" id="deployWebAuthnVerifier" title="Deploys WebAuthnVerifier (UV required) or WebAuthnVerifierNoUV (UP only) per the UV policy selector. Neither takes constructor args.">Deploy WebAuthnVerifier</button>
+          <button class="warn" id="deploySingleton" title="Deploys the Lockdown singleton bound to MULTI_SEND_CALL_ONLY from the Network panel.">Deploy Lockdown singleton</button>
+          <button class="secondary" id="readCodehashes" title="Reads on-chain EXTCODEHASH of the singleton, verifiers and MultiSendCallOnly so you can paste them into the manifest.">Read on-chain codehashes</button>
+        </div>
+        <div class="output"><pre id="infraOut">No deployment action yet.</pre></div>
+      </section>
+
+      <!-- ============================ 3 INITIALIZE ============================ -->
+      <section id="init">
+        <div class="sectitle"><span class="badge">3</span><h2>Build initialize() for this Safe</h2></div>
+        <p>One-shot per Safe. The install transaction atomically wires the three slots and initializes the baseline. Additional signers, timelock activation, and bypassers should be configured later as separate, independently reviewed Safe transactions.</p>
+        <div class="grid">
+          <label>Safe address
+            <input id="initSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown duration (seconds, max 30d)
+            <input id="initDuration" value="604800" />
+          </label>
+          <label>Resume delay (seconds, 4h..7d)
+            <input id="initResumeDelay" value="14400" />
+          </label>
+          <label>Timelock delay to set after install (seconds, 0 = none, 1h..30d)
+            <input id="initTimelockDelay" value="0" />
+          </label>
+        </div>
+        <div class="grid">
+          <label>Initial recovery owners (cold backups), one per line - required
+            <textarea id="initRecoveryOwners" placeholder="0x..."></textarea>
+          </label>
+        </div>
+        <label>Initial panic signers - one per line. Supported formats: <code>0xPanicAddress</code> (ecdsa identity, no verifier), <code>password,0xPasswordVerifier,secret</code>, or <code>webauthn,0xWebAuthnVerifier,0x&lt;128hex&gt;</code>. Each row becomes a single ERC-7913 <code>bytes</code> identity.
+          <textarea id="initSigners" placeholder="0xPanicAddress&#10;password,0xPasswordVerifier,correct horse...&#10;webauthn,0xWebAuthnVerifier,0x_qx_qy_64_bytes"></textarea>
+        </label>
+        <div class="warnbox">
+          At least one recovery owner is required (else <code>RecoveryOwners_EmptyAllowlist</code>). Use a cold backup, not the Safe and not a daily owner.
+          The runbook recommends at least two distinct backups. A Safe with zero signers is installed but <strong>dormant</strong> (cannot panic).
+        </div>
+        <div class="dangerbox" style="margin-top:10px">
+          <strong>PasswordVerifier is a one-time-password path, not a secret-preserving path.</strong>
+          The commitment is public and the cleartext is revealed in RPC/mempool calldata at trigger time. Disclosure after a successful trigger is harmless because that identity is permanently burnt; disclosure before a successful burn lets anyone submit the same panic trigger. A failed/reverted attempt can reveal the password while leaving the identity live. Use unique high-entropy material per Safe and chain, never reuse it, and prefer private submission.
+        </div>
+        <label style="margin-top:8px"><span><input type="checkbox" id="initAckPasswordRisk" style="width:auto" /> I accept the one-time-password disclosure and front-running model for any password signer in initialize()</span></label>
+        <div class="actions">
+          <button class="secondary" id="buildInitialize" title="Encodes initialize(...) and stores it for the atomic install bundle in step 4.">Build initialize() calldata</button>
+        </div>
+        <div class="output"><pre id="initOut">No initialize built yet.</pre></div>
+      </section>
+
+      <!-- ============================ 4 INSTALL ============================ -->
+      <section id="install">
+        <div class="sectitle"><span class="badge">4</span><h2>Preflight &amp; install guards (atomic)</h2></div>
+        <div class="dangerbox">
+          Installing the wrong guard can permanently block the Safe. This panel refuses to build install JSON unless the
+          read-only preflight passes: Safe v1.5.0, Safe masterCopy is the canonical singleton, the Lockdown singleton,
+          MultiSendCallOnly and LockdownFallbackHandler codehashes match the expected (pinned) hashes, and the singleton
+          advertises both guard interfaces. The generated batch runs <code>setGuard</code> + <code>setModuleGuard</code> +
+          <code>setFallbackHandler</code> + <code>initialize</code> in one Safe
+          transaction so no asymmetric / uninitialised intermediate state is ever observable (anti T-INSTALL-1).
+        </div>
+        <div class="grid">
+          <label>Safe address
+            <input id="installSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="installSingleton" placeholder="0x..." />
+          </label>
+        </div>
+        <label style="margin-top:8px"><span><input type="checkbox" id="installIncludeInit" style="width:auto" checked /> Include initialize() from step 3 in the batch (uncheck if the Safe is already initialised)</span></label>
+        <div class="actions">
+          <button class="secondary" id="buildInstall" title="Runs the full codehash + interface preflight, then builds an atomic [setGuard, setModuleGuard, setFallbackHandler, initialize?] batch.">Preflight &amp; build install batch</button>
+        </div>
+        <div class="output"><pre id="installOut">No install preflight run yet.</pre></div>
+
+        <h3>Verified rollback to the pre-install slot configuration</h3>
+        <div class="dangerbox">
+          This restores the Safe's transaction guard, module guard, and fallback handler slots; it cannot erase Safe nonces/events or Lockdown's persistent per-Safe config, burnt identities, incidents, or tickets. Capture and download the snapshot <strong>before signing the install</strong>. Restoration is staged because an unknown previous guard must be installed last.
+          The checksum detects accidental corruption; it does not authenticate an untrusted snapshot. Store the exported file with the installation evidence and independently verify every restore address/codehash.
+        </div>
+        <div class="grid" style="margin-top:10px">
+          <label>Load pre-install rollback snapshot
+            <input id="rollbackSnapshotFile" type="file" accept=".json,application/json" />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="captureRollbackSnapshot" title="Reads the three Safe slots, masterCopy, and codehashes at one block number/hash; binds them with a checksum.">Capture pre-install snapshot</button>
+          <button class="secondary" id="downloadRollbackSnapshot">Download snapshot</button>
+        </div>
+        <div class="actions">
+          <button class="danger" id="buildRemove" title="Stage 1: after verification, sets module guard then transaction guard to address(0). If the timelock is active, schedule and wait first.">Stage 1 · deactivate Lockdown guards</button>
+          <button class="warn" id="buildRestoreFallback" title="Stage 2: restores the snapshotted fallback handler while both guards are zero.">Stage 2 · restore fallback handler</button>
+          <button class="warn" id="buildRestoreGuards" title="Stage 3: restores the previous module guard then the previous transaction guard last.">Stage 3 · restore previous guards</button>
+        </div>
+        <div class="output"><pre id="rollbackOut">No pre-install rollback snapshot loaded.</pre></div>
+      </section>
+
+      <!-- ============================ 5 VERIFIERS & SIGNERS ============================ -->
+      <section id="verifiers">
+        <div class="sectitle"><span class="badge">5</span><h2>Verifiers &amp; panic signers</h2></div>
+        <p>Register explicit <code>bytes</code> panic-signer identities (ecdsa = the 20-byte address itself; password/webauthn = verifier || key). Use the drill (<code>testSigner</code>) to confirm a real identity+signature verifies without burning a signer.</p>
+        <div class="grid">
+          <label>Safe address
+            <input id="sigSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="sigSingleton" placeholder="0x..." />
+          </label>
+          <label>Verifier scheme
+            <select id="sigType">
+              <option value="ecdsa">ECDSA (hardware wallet / burner)</option>
+              <option value="password">Password (cleartext, tier-2)</option>
+              <option value="webauthn">WebAuthn passkey (P-256)</option>
+            </select>
+          </label>
+          <label>Verifier address (password / webauthn only; ecdsa needs none)
+            <input id="sigVerifier" placeholder="0x... PasswordVerifier / WebAuthnVerifier" />
+          </label>
+          <label>Material - ECDSA address, or WebAuthn pubkey (0x qx||qy, 64 bytes)
+            <input id="sigMat" placeholder="0x..." />
+          </label>
+          <label>Password (Password scheme only - key = keccak256(utf8(password)))
+            <input id="sigSecret" type="password" placeholder="high-entropy, >= 80 bits" />
+          </label>
+        </div>
+        <div class="dangerbox" id="sigSchemeHelp">
+          Password scheme: this is a one-time-password path. The commitment is public; at trigger time the cleartext is exposed over RPC and the public mempool. After a successful trigger the identity is permanently burnt, but a failed/reverted attempt can leak the password while it remains live, and anyone who sees it first can submit the same trigger. Use unique per-Safe, per-chain, >= 80-bit material, never reuse it, and prefer private submission. WebAuthn: register the
+          64-byte P-256 public key; the passkey signs the EIP-712 digest as the challenge (mempool-safe, replay-bound).
+        </div>
+        <label style="margin-top:8px"><span><input type="checkbox" id="ackPasswordRisk" style="width:auto" /> I accept the one-time-password disclosure and front-running model before adding or rotating to a password signer</span></label>
+        <div class="actions">
+          <button class="secondary" id="sigCreatePasskey" title="Runs a WebAuthn registration ceremony and fills the material field with the new passkey's 64-byte P-256 public key. Needs https or 127.0.0.1.">Create passkey -> fill pubkey</button>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="refreshSignerStatus" title="Reads isLockdownSigner and isSignerBurntPermanently for this bytes identity; enables the buttons below accordingly.">Refresh status</button>
+          <button class="secondary" id="buildAddSigner" disabled title="Builds addLockdownSigner(signer). Disabled when this identity is already registered or permanently burnt.">Build addLockdownSigner</button>
+          <button class="secondary" id="buildRemoveSigner" title="Builds removeLockdownSigner(signer). Allowed in Normal or Recovering.">Build removeLockdownSigner</button>
+        </div>
+        <h3>Rotate (atomic remove + add)</h3>
+        <p class="small">Old key uses the scheme/material/password above. New key uses the scheme selected here.</p>
+        <div class="grid">
+          <label>New scheme
+            <select id="sigRotType">
+              <option value="ecdsa">ECDSA</option>
+              <option value="password">Password</option>
+              <option value="webauthn">WebAuthn passkey</option>
+            </select>
+          </label>
+          <label>New verifier (rotate target)
+            <input id="sigRotVerifier" placeholder="0x..." />
+          </label>
+          <label>New material - address / WebAuthn pubkey
+            <input id="sigRotMat" placeholder="0x..." />
+          </label>
+          <label>New password (Password scheme only)
+            <input id="sigRotSecret" type="password" placeholder="..." />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="buildRotateSigner" title="Builds rotateLockdownSigner(oldSigner, newSigner).">Build rotateLockdownSigner</button>
+          <button class="secondary" id="listSigners" title="Reads getLockdownSigners(safe) and shows all live bytes identities.">List registered signers</button>
+        </div>
+        <div class="output"><pre id="signerOut">No signer action yet.</pre></div>
+      </section>
+
+      <!-- ============================ 6 TIMELOCK ============================ -->
+      <section id="timelock">
+        <div class="sectitle"><span class="badge">6</span><h2>Timelock (anti-coercion lever, v1.0.0)</h2></div>
+        <div class="warnbox">
+          With <code>timelockDelay == 0</code> the Safe has <strong>no coercion resistance</strong>: a quorum can remove the guard or
+          disarm signers in a single transaction (INV-LIVE-1). Turning the timelock <em>on</em> (0&rarr;N) is free and immediate; every
+          later change - <em>including turning it back to 0</em> - must itself be scheduled and wait <code>timelockDelay</code>.
+          Also note (T-LIVE-2): the effective coercion window is <code>min(timelockDelay, lockdownDuration + resumeDelay)</code>,
+          so do not set a short lockdown duration against a long timelock.
+        </div>
+        <div class="grid">
+          <label>Safe address
+            <input id="tlSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="tlSingleton" placeholder="0x..." />
+          </label>
+          <label>Timelock delay (seconds, 0 or 1h..30d)
+            <input id="tlDelay" value="86400" />
+          </label>
+          <label>Bypasser address (HSM)
+            <input id="tlBypasser" placeholder="0x..." />
+          </label>
+          <label>Bypasser enabled
+            <select id="tlBypasserEnabled"><option value="true">true</option><option value="false">false</option></select>
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="buildSetTimelock" title="Builds setTimelockDelay(delay). The first 0->N activation is free; later changes are themselves timelocked.">Build setTimelockDelay</button>
+          <button class="secondary" id="buildSetBypasser" title="Builds setTimelockBypasser(addr, enabled). HSM compromise = full bypass authority - off-chain policy must refuse disarm bypasses.">Build setTimelockBypasser</button>
+          <button class="secondary" id="buildBypassTimelock" title="HSM-side direct call: bypassTimelock(safe, safeTxHash) sets executableAt = now for one owner-path tx. The caller must be an allowlisted bypasser. Uses the owner-path fields below.">Build bypassTimelock (HSM)</button>
+        </div>
+        <h3>Owner-path timelock</h3>
+        <p>Owner-path tickets are scheduled from the full Safe tx and signatures via <code>scheduleTransaction</code>. This panel still computes the Safe <code>safeTxHash</code> for cancel, bypass, and diagnostics.</p>
+        <div class="grid-3">
+          <label>to <input id="annTo" placeholder="0x..." /></label>
+          <label>value (wei) <input id="annValue" value="0" /></label>
+          <label>operation <select id="annOp"><option value="0">CALL</option><option value="1">DELEGATECALL</option></select></label>
+          <label>safeTxGas <input id="annSafeTxGas" value="0" /></label>
+          <label>baseGas <input id="annBaseGas" value="0" /></label>
+          <label>gasPrice <input id="annGasPrice" value="0" /></label>
+          <label>gasToken <input id="annGasToken" placeholder="0x0..0" /></label>
+          <label>refundReceiver <input id="annRefundReceiver" placeholder="0x0..0" /></label>
+          <label>nonce (blank = current Safe nonce) <input id="annNonce" placeholder="auto" /></label>
+        </div>
+        <label>data <textarea id="annData" placeholder="0x"></textarea></label>
+        <label>Safe signatures <textarea id="annSignatures" placeholder="0x... packed Safe signatures for this exact transaction"></textarea></label>
+        <div class="actions">
+          <button class="secondary" id="computeSafeTxHash" title="Reads Safe.getTransactionHash(...) for the fields above.">Compute safeTxHash</button>
+          <button class="secondary" id="buildScheduleOwner" title="Builds a permissionless direct call to scheduleTransaction(safe, nonce, params, signatures). Relay it from an EOA or service; do not execute it through the Safe.">Build scheduleTransaction direct call</button>
+          <button class="secondary" id="buildCancelOwner" title="Builds cancelTransaction(safeTxHash).">Build cancelTransaction</button>
+        </div>
+        <h3>Module-path scheduling</h3>
+        <div class="grid-3">
+          <label>module <input id="modModule" placeholder="0x..." /></label>
+          <label>to <input id="modTo" placeholder="0x..." /></label>
+          <label>value (wei) <input id="modValue" value="0" /></label>
+        </div>
+        <label>data <textarea id="modData" placeholder="0x"></textarea></label>
+        <div class="actions">
+          <button class="secondary" id="buildScheduleModule" title="Builds scheduleModuleTransaction(module,to,value,data,CALL). No module-path bypass exists.">Build scheduleModuleTransaction</button>
+          <button class="secondary" id="buildCancelModule" title="Builds cancelModuleTransaction(moduleTxHash) from the fields above.">Build cancelModuleTransaction</button>
+          <button class="secondary" id="readTimelockState" title="Reads getTimelockDelay and any pending ticket executableAt for the fields above.">Read timelock state</button>
+        </div>
+        <div class="output"><pre id="timelockOut">No timelock action yet.</pre></div>
+      </section>
+
+      <!-- ============================ 6b PARAMS ============================ -->
+      <section id="params">
+        <div class="sectitle"><span class="badge">6b</span><h2>Admin parameters (Normal mode)</h2></div>
+        <p>Owner-path self-calls to the singleton. When <code>timelockDelay &gt; 0</code> these must be scheduled (step 6) and waited like any other owner-path tx. Forbidden while a lockdown is active.</p>
+        <div class="grid">
+          <label>Lockdown singleton
+            <input id="prmSingleton" placeholder="0x..." />
+          </label>
+          <label>Lockdown duration (seconds)
+            <input id="prmDuration" value="604800" />
+          </label>
+          <label>Resume delay (seconds)
+            <input id="prmResumeDelay" value="14400" />
+          </label>
+          <label>Recovery owner
+            <input id="prmRecoveryOwner" placeholder="0x..." />
+          </label>
+          <label>Recovery owner action
+            <select id="prmRecoveryAllowed"><option value="true">add (allow)</option><option value="false">remove (disallow)</option></select>
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="buildSetDuration" title="Builds setLockdownDuration(newDuration).">Build setLockdownDuration</button>
+          <button class="secondary" id="buildSetResumeDelay" title="Builds setResumeDelay(newDelay).">Build setResumeDelay</button>
+          <button class="secondary" id="buildSetRecoveryOwner" title="Builds addRecoveryOwner(owner) or removeRecoveryOwner(owner) per the action. Cannot drop the allowlist to zero.">Build add/removeRecoveryOwner</button>
+        </div>
+        <div class="output"><pre id="paramsOut">No parameter action yet.</pre></div>
+      </section>
+
+      <!-- ============================ 7 TRIGGER ============================ -->
+      <section id="trigger">
+        <div class="sectitle"><span class="badge">7</span><h2>Trigger lockdown (EIP-712 panic flow)</h2></div>
+        <div class="dangerbox">
+          Single-use: a successful trigger <strong>burns</strong> the signer entry and permanently retires that <code>bytes</code> identity.
+          The whole Safe freezes for <code>lockdownDuration + resumeDelay</code>. Always run the read-only drill first.
+        </div>
+        <div class="dangerbox" style="margin-top:10px">
+          Password trigger: the cleartext is exposed to the RPC provider and mempool. This is acceptable only as a one-time password: successful execution burns it permanently. If submission fails or reverts, assume the password leaked while still live and replace it before relying on it again. A mempool observer may front-run the same trigger; the expected security outcome is still lockdown, but submit privately when possible.
+        </div>
+        <div class="grid">
+          <label>Safe address
+            <input id="trigSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="trigSingleton" placeholder="0x..." />
+          </label>
+          <label>Verifier scheme
+            <select id="trigType">
+              <option value="ecdsa">ECDSA</option>
+              <option value="password">Password</option>
+              <option value="webauthn">WebAuthn passkey</option>
+            </select>
+          </label>
+          <label>Verifier address
+            <input id="trigVerifier" placeholder="0x..." />
+          </label>
+          <label>Material - ECDSA address / WebAuthn pubkey (0x, 64 bytes)
+            <input id="trigMat" placeholder="0x..." />
+          </label>
+          <label>Password (Password scheme only)
+            <input id="trigSecret" type="password" placeholder="the cleartext panic password" />
+          </label>
+          <label>Reason text to hash locally (optional)
+            <input id="trigReasonText" placeholder="incident-YYYY-MM-DD..." />
+          </label>
+          <label>Reason hash override (bytes32, optional)
+            <input id="trigReasonHash" placeholder="0x..." />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="buildDigest" title="Confirms the bytes identity is registered, recomputes the EIP-712 domain separator (and cross-checks the domain inputs against eip712Domain()), and shows the exact digest to sign. For Password it also stages the cleartext as the signature; for WebAuthn it prepares the challenge.">1 · Build digest / prepare</button>
+        </div>
+        <h3>Signature</h3>
+        <p class="small">ECDSA: the burner key signs the raw digest (no personal_sign prefix); a connected wallet signs the EIP-712 typed data (eth_signTypedData_v4, clear-signed). WebAuthn: the passkey signs the digest as its challenge. Password: the cleartext IS the signature (leaks over the mempool at submit; drilling leaks it over RPC).</p>
+        <div class="grid">
+          <label>Burner private key (ECDSA, signs locally, never sent)
+            <input id="trigPrivKey" placeholder="0x... optional" type="password" />
+          </label>
+          <label>Or paste a signature (ECDSA 65-byte r||s||v, or a flat-encoded WebAuthn assertion)
+            <input id="trigSigPaste" placeholder="0x..." />
+          </label>
+          <label>WebAuthn user verification request
+            <select id="trigWebAuthnUV"><option value="preferred">preferred</option><option value="required">required (for REQUIRE_UV verifier)</option><option value="discouraged">discouraged</option></select>
+          </label>
+        </div>
+        <label style="margin-top:8px"><span><input type="checkbox" id="allowPasswordDrill" style="width:auto" /> I understand Password testSigner leaks the cleartext over RPC; allow password drill anyway</span></label>
+        <div class="actions">
+          <button class="secondary" id="signWithKey" title="ECDSA: signs the digest locally with the burner key (canonical low-s).">Sign with burner key (ECDSA)</button>
+          <button class="secondary" id="signWithWallet" title="ECDSA: requests EIP-712 typed-data signing from the connected wallet. The signature must match the contract digest exactly; personal_sign / eth_sign are not used.">Sign with wallet (EIP-712)</button>
+          <button class="secondary" id="signWithPasskey" title="WebAuthn: runs navigator.credentials.get with the digest as challenge and assembles the assertion. Needs https or 127.0.0.1.">Sign with passkey (WebAuthn)</button>
+          <button class="secondary" id="usepastedSig" title="Uses the pasted signature: ECDSA is normalised; WebAuthn/Password are taken as-is.">Use pasted signature</button>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="drillVerify" title="Read-only testSigner(signer, digest, signature): confirms the signature verifies WITHOUT burning the signer. Enables submit on success.">2 · Drill verify (no burn)</button>
+          <button class="warn" id="submitTrigger" disabled title="Submits triggerLockdown as a direct wallet call, then waits for confirmation and verifies LockedDown state. ECDSA/WebAuthn require a successful drill; production passwords may skip the drill to avoid an extra RPC disclosure.">3 · Submit triggerLockdown</button>
+          <button class="secondary" id="buildTriggerJson" title="Builds a direct-call relayer artifact. Never import it into Safe Wallet: the panic trigger must be submitted from an EOA or relayer, not by the Safe.">Build direct-call trigger artifact</button>
+        </div>
+        <div class="output"><pre id="triggerOut">No trigger action yet.</pre></div>
+      </section>
+
+      <!-- ============================ 8 STATE ============================ -->
+      <section id="state">
+        <div class="sectitle"><span class="badge">8</span><h2>State &amp; timers</h2></div>
+        <div class="grid">
+          <label>Safe address
+            <input id="stateSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="stateSingleton" placeholder="0x..." />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="readState" title="Reads getState, getConfigSnapshot, getTimelockDelay, lastReasonHash and computes the resume-eligible timestamp.">Read Lockdown state</button>
+        </div>
+        <div class="output"><pre id="stateOut">No state read yet.</pre></div>
+      </section>
+
+      <!-- ============================ 9 RECOVERY ============================ -->
+      <section id="recovery">
+        <div class="sectitle"><span class="badge">9</span><h2>Recovery operations</h2></div>
+        <div class="warnbox">
+          Recovery JSON is for the post-lockdown window only (state = Recovering). The whitelist is narrow: empty nonce burn,
+          <code>swapOwner</code> to a pre-registered backup, <code>disableModule</code>, and
+          <code>removeLockdownSigner</code>. The Safe returns to <code>Normal</code> automatically after
+          <code>lockdownUntil + resumeDelay</code>; no resume transaction exists. All refund fields
+          (<code>safeTxGas/baseGas/gasPrice/gasToken/refundReceiver</code>) MUST be zero.
+        </div>
+        <div class="grid">
+          <label>Safe address
+            <input id="recSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="recSingleton" placeholder="0x..." />
+          </label>
+          <label>prevOwner for swapOwner
+            <input id="recPrevOwner" placeholder="blank = calculate from getOwners()" />
+          </label>
+          <label>oldOwner (compromised)
+            <input id="recOldOwner" placeholder="0x..." />
+          </label>
+          <label>newOwner (allowlisted backup)
+            <input id="recNewOwner" placeholder="0x..." />
+          </label>
+          <label>Other compromised owners, one per line (threshold safety)
+            <textarea id="recOtherCompromised" placeholder="0x... optional"></textarea>
+          </label>
+          <label>prevModule for disableModule
+            <input id="recPrevModule" placeholder="0x... (Safe linked-list predecessor)" />
+          </label>
+          <label>Module to disable
+            <input id="recModule" placeholder="0x..." />
+          </label>
+          <label>Verifier (for remove / revoke)
+            <input id="recVerifier" placeholder="0x..." />
+          </label>
+          <label>Scheme of the signer to remove
+            <select id="recType">
+              <option value="ecdsa">ECDSA</option>
+              <option value="password">Password</option>
+              <option value="webauthn">WebAuthn passkey</option>
+            </select>
+          </label>
+          <label>Material to remove - address / WebAuthn pubkey (0x, 64 bytes)
+            <input id="recMat" placeholder="0x..." />
+          </label>
+          <label>Password to remove (Password scheme only)
+            <input id="recSecret" type="password" placeholder="..." />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="validateRecovery" title="Reads owners, threshold, state, allowlist/signer flags and whether uncompromised owners still reach threshold.">Validate recovery inputs</button>
+          <button class="secondary" id="recNonceBurn" title="Builds an empty Safe self-call to consume a suspicious nonce.">Build nonce-burn JSON</button>
+          <button class="secondary" id="recSwapOwner" title="Calculates prevOwner if blank and verifies oldOwner/newOwner/allowlist/threshold.">Validate &amp; build swapOwner JSON</button>
+          <button class="secondary" id="recDisableModule" title="Builds the Safe self-call disableModule(prevModule,module), allowed only during Recovering.">Build disableModule JSON</button>
+          <button class="secondary" id="recRemoveSignerBtn" title="Builds removeLockdownSigner(signer) to cull a surviving compromised signer.">Build removeLockdownSigner JSON</button>
+          <button class="secondary" id="checkAutoResume" title="Reads chain time and confirms whether the Safe has automatically returned to Normal. This never builds a transaction.">Check auto-resume status</button>
+        </div>
+        <div class="output"><pre id="recoveryOut">No recovery validation run yet.</pre></div>
+      </section>
+
+      <!-- ============================ 10 JANITOR ============================ -->
+      <section id="janitor">
+        <div class="sectitle"><span class="badge">10</span><h2>Tickets &amp; janitor</h2></div>
+        <p>Permissionless cleanup of tickets past their 90-day TTL, plus a burnt-key check before re-arming.</p>
+        <div class="grid">
+          <label>Safe address
+            <input id="janSafe" placeholder="0x..." />
+          </label>
+          <label>Lockdown singleton
+            <input id="janSingleton" placeholder="0x..." />
+          </label>
+          <label>Owner-path safeTxHash to sweep
+            <input id="janOwnerHash" placeholder="0x..." />
+          </label>
+          <label>Verifier (burnt-key check)
+            <input id="janVerifier" placeholder="0x..." />
+          </label>
+          <label>Scheme (burnt-key check)
+            <select id="janType">
+              <option value="ecdsa">ECDSA</option>
+              <option value="password">Password</option>
+              <option value="webauthn">WebAuthn passkey</option>
+            </select>
+          </label>
+          <label>Material - address / WebAuthn pubkey (0x, 64 bytes)
+            <input id="janMat" placeholder="0x..." />
+          </label>
+          <label>Password (Password scheme only)
+            <input id="janSecret" type="password" placeholder="..." />
+          </label>
+        </div>
+        <h3>Module sweep params</h3>
+        <div class="grid-3">
+          <label>module <input id="janModModule" placeholder="0x..." /></label>
+          <label>to <input id="janModTo" placeholder="0x..." /></label>
+          <label>value (wei) <input id="janModValue" value="0" /></label>
+        </div>
+        <label>data <textarea id="janModData" placeholder="0x"></textarea></label>
+        <div class="actions">
+          <button class="secondary" id="buildSweepOwner" title="Builds sweepExpiredOwnerTicket(safe, safeTxHash). Anyone may call; only deletes a past-TTL entry.">Build sweep owner JSON</button>
+          <button class="secondary" id="buildSweepModule" title="Builds sweepExpiredModuleTicket(safe, moduleTxHash) from the fields above.">Build sweep module JSON</button>
+          <button class="secondary" id="checkBurntKey" title="Reads isSignerBurntPermanently - a re-add of a burnt identity would revert LockdownSigners_BurntPermanently.">Check burnt-key</button>
+        </div>
+        <div class="output"><pre id="janitorOut">No janitor action yet.</pre></div>
+      </section>
+
+      <!-- ============================ BUILDER ============================ -->
+      <section id="builder">
+        <div class="sectitle"><h2>Last generated artifact</h2></div>
+        <p><span class="pill">Clear-signing preview</span> Safe operations are Safe Transaction Builder JSON. HSM bypass and panic trigger are direct-call artifacts and must not be imported into the Safe.</p>
+        <div class="actions">
+          <button class="secondary" id="copyJson" title="Copies the generated JSON artifact to the clipboard.">Copy generated JSON</button>
+          <button class="secondary" id="downloadJson" title="Downloads the generated JSON artifact.">Download generated JSON</button>
+        </div>
+        <div class="output"><pre id="previewOut">No transaction generated yet.</pre></div>
+      </section>
+    </div>
+  </main>
+
+  <script src="./vendor/ethers-6.13.5.umd.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const REQUIRED_SAFE_VERSION = "1.5.0";
+    const SINGLETON_VERSION = "1.0.0";
+    const TX_GUARD_IFACE = "0xe6d7a83a";
+    const MODULE_GUARD_IFACE = "0x58401ed8";
+    const ERC165_IFACE = "0x01ffc9a7";
+    const SAFE_GUARD_SLOT = "0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8";
+    const SAFE_MODULE_GUARD_SLOT = "0xb104e0b93118902c651344349b610029d694cfdec91c589c91ebafbcd0289947";
+    const SAFE_FALLBACK_HANDLER_SLOT = "0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5";
+    const SAFE_MASTERCOPY_SLOT = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const SENTINEL_MODULES = "0x0000000000000000000000000000000000000001";
+    const SECP256K1_N_DIV_2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+    const LOCKDOWN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("Lockdown(address safe,bytes32 reasonHash)"));
+    const DOMAIN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"));
+
+    const NETWORKS = {
+      "1": { chainId: "1", rpc: "https://ethereum.publicnode.com", multiSend: "0xA83c336B20401Af773B6219BA5027174338D1836", safeSingleton: "0xFf51A5898e281Db6DfC7855790607438dF2ca44b", factory: "0x14F2982D601c9458F93bd70B218933A6f8165e7b", fallback: "" },
+      "8453": { chainId: "8453", rpc: "https://base.publicnode.com", multiSend: "0xA83c336B20401Af773B6219BA5027174338D1836", safeSingleton: "0xFf51A5898e281Db6DfC7855790607438dF2ca44b", factory: "0x14F2982D601c9458F93bd70B218933A6f8165e7b", fallback: "" },
+    };
+
+    const ABI = {
+      safe: [
+        "function VERSION() view returns (string)",
+        "function getOwners() view returns (address[])",
+        "function getThreshold() view returns (uint256)",
+        "function nonce() view returns (uint256)",
+        "function getGuard() view returns (address)",
+        "function getModuleGuard() view returns (address)",
+        "function getModulesPaginated(address start,uint256 pageSize) view returns (address[] array,address next)",
+        "function setGuard(address guard)",
+        "function setModuleGuard(address moduleGuard)",
+        "function setFallbackHandler(address handler)",
+        "function swapOwner(address prevOwner,address oldOwner,address newOwner)",
+        "function disableModule(address prevModule,address module)",
+        "function setup(address[] owners,uint256 threshold,address to,bytes data,address fallbackHandler,address paymentToken,uint256 payment,address payable paymentReceiver)",
+        "function getTransactionHash(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,uint256 _nonce) view returns (bytes32)",
+      ],
+      lockdown: [
+        "constructor(address multiSendCallOnly)",
+        "function VERSION() view returns (string)",
+        "function MULTI_SEND_CALL_ONLY() view returns (address)",
+        "function eip712Domain() view returns (bytes1 fields,string name,string version,uint256 chainId,address verifyingContract,bytes32 salt,uint256[] extensions)",
+        "function supportsInterface(bytes4 interfaceId) view returns (bool)",
+        "function initialize(uint64 lockdownDuration,uint64 resumeDelay,address[] initialRecoveryOwners,bytes[] initialSigners)",
+        "function setLockdownDuration(uint64 newDuration)",
+        "function setResumeDelay(uint64 newDelay)",
+        "function addRecoveryOwner(address owner)",
+        "function removeRecoveryOwner(address owner)",
+        "function addLockdownSigner(bytes signer)",
+        "function removeLockdownSigner(bytes signer)",
+        "function rotateLockdownSigner(bytes oldSigner,bytes newSigner)",
+        "function setTimelockDelay(uint64 newDelay)",
+        "function setTimelockBypasser(address bypasser,bool allowed)",
+        "function scheduleTransaction(address safe,uint256 nonce,(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver) params,bytes signatures)",
+        "function cancelTransaction(bytes32 safeTxHash)",
+        "function scheduleModuleTransaction(address module,address to,uint256 value,bytes data,uint8 operation) returns (bytes32)",
+        "function cancelModuleTransaction(bytes32 moduleTxHash)",
+        "function bypassTimelock(address safe,bytes32 safeTxHash)",
+        "function sweepExpiredOwnerTicket(address safe,bytes32 safeTxHash)",
+        "function sweepExpiredModuleTicket(address safe,bytes32 moduleTxHash)",
+        "function triggerLockdown(address safe,bytes32 reasonHash,bytes signer,bytes signature)",
+        "function testSigner(bytes signer,bytes32 hash,bytes signature) view returns (bool ok)",
+        "function isLockdownSigner(address safe,bytes signer) view returns (bool)",
+        "function isSignerBurntPermanently(address safe,bytes signer) view returns (bool)",
+        "function isRecoveryOwner(address safe,address owner) view returns (bool)",
+        "function getRecoveryOwners(address safe) view returns (address[])",
+        "function isTimelockBypasser(address safe,address bypasser) view returns (bool)",
+        "function getLockdownSigners(address safe) view returns (bytes[])",
+        "function getState(address safe) view returns (uint8 state,uint64 secondsRemaining)",
+        "function getConfigSnapshot(address safe) view returns (uint64 lockdownDuration,uint64 resumeDelay,uint64 lockdownUntil,uint256 signersCount,uint256 recoveryOwnerAllowlistCount)",
+        "function getTimelockDelay(address safe) view returns (uint64)",
+        "function getTransactionExecutableAt(address safe,bytes32 safeTxHash) view returns (uint64)",
+        "function getModuleTransactionExecutableAt(address safe,bytes32 moduleTxHash) view returns (uint64)",
+        "function getModuleTransactionHash(address safe,address module,address to,uint256 value,bytes data,uint8 operation) view returns (bytes32)",
+        "function lastReasonHash(address safe) view returns (bytes32)",
+      ],
+      handler: ["function LOCKDOWN() view returns (address)"],
+      factory: ["function createProxyWithNonce(address singleton,bytes initializer,uint256 saltNonce) returns (address proxy)"],
+    };
+
+    const iface = { safe: new ethers.Interface(ABI.safe), lockdown: new ethers.Interface(ABI.lockdown), handler: new ethers.Interface(ABI.handler) };
+
+    let provider, signer, readProvider, readProviderKey = "";
+    let selectedInjectedProvider;
+    const announcedProviders = [];
+    let singletonArtifactBytecode = "", passwordVerifierArtifactBytecode = "", webauthnVerifierArtifactBytecode = "", webauthnVerifierNoUVArtifactBytecode = "";
+    let lastBuilder = null, lastDiagnostic = null, lastInitializeData = null;
+    let rollbackSnapshot = null;
+    let loadedManifest = null, loadedManifestSource = "";
+    let triggerCtx = null; // { digest, identity, signature }
+
+    function log(id, value) {
+      $(id).textContent = typeof value === "string" ? value : JSON.stringify(value, (_, v) => typeof v === "bigint" ? v.toString() : v, 2);
+    }
+
+    window.addEventListener("eip6963:announceProvider", (e) => { if (e.detail && e.detail.provider) announcedProviders.push(e.detail); });
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+    // ---------- input helpers ----------
+    function requireAddress(value, label) {
+      if (!ethers.isAddress(value)) throw new Error(`${label} is not a valid address`);
+      return ethers.getAddress(value);
+    }
+    function optionalAddress(value, label) { return value.trim() ? requireAddress(value.trim(), label) : ""; }
+    function linesToAddresses(value, label) {
+      return value.split(/\r?\n|,/).map((x) => x.trim()).filter(Boolean).map((x, i) => requireAddress(x, `${label}[${i}]`));
+    }
+    function numeric(value, label) {
+      if (!/^[0-9]+$/.test(String(value).trim())) throw new Error(`${label} must be a decimal integer`);
+      return BigInt(String(value).trim());
+    }
+    function boolValue(id) { return $(id).value === "true"; }
+    function bytes32(value, label) {
+      const v = value.trim();
+      if (!/^0x[0-9a-fA-F]{64}$/.test(v)) throw new Error(`${label} must be a 0x 32-byte hex value`);
+      return v;
+    }
+    function hexData(value, label) {
+      const v = (value || "").trim() || "0x";
+      if (!/^0x([0-9a-fA-F]{2})*$/.test(v)) throw new Error(`${label} must be 0x hex with even length`);
+      return v;
+    }
+    function ecdsaAddress(addr, label) { return ethers.getAddress(requireAddress(addr, label)).toLowerCase(); }
+    // ERC-7913 key material per verifier scheme (the part after the verifier):
+    //   password -> 32-byte commitment = keccak256(utf8(password))
+    //   webauthn -> 64-byte P-256 public key qx||qy (provided directly)
+    function passwordCommitment(secret) {
+      if (!secret) throw new Error("Empty password: refusing to register the keccak256(\"\") commitment - the verifier rejects empty signatures, so it can never trigger a lockdown.");
+      return ethers.keccak256(ethers.toUtf8Bytes(secret));
+    }
+    function webauthnPubkey(v, label) {
+      const s = (v || "").trim();
+      if (!/^0x[0-9a-fA-F]{128}$/.test(s)) throw new Error(`${label}: WebAuthn key must be 0x + 128 hex (qx||qy, 64 bytes)`);
+      return s.toLowerCase();
+    }
+    // reads a `<prefix>Type` select + a material field (`<prefix>Mat` for
+    // address/pubkey, `<prefix>Secret` for password) and returns the key material.
+    function deriveKey(prefix, label) {
+      const type = keyTypeOf(prefix);
+      if (type === "password") return passwordCommitment($(prefix + "Secret").value);
+      if (type === "webauthn") return webauthnPubkey($(prefix + "Mat").value, label || "key");
+      return ecdsaAddress($(prefix + "Mat").value, label || "address");
+    }
+    function keyTypeOf(prefix) { return $(prefix + "Type") ? $(prefix + "Type").value : "ecdsa"; }
+    // ERC-7913 bytes signer identity:
+    //   ecdsa    -> the 20-byte EOA/ERC-1271 address itself (no verifier)
+    //   password -> verifier(20) || keccak256(utf8(password))(32)  = 52 bytes
+    //   webauthn -> verifier(20) || (qx||qy)(64)                   = 84 bytes
+    function buildIdentity(type, verifierAddr, key) {
+      if (type === "ecdsa") return ecdsaAddress(key, "ecdsa identity address");
+      return ethers.concat([ethers.getAddress(requireAddress(verifierAddr, "verifier")), key]).toLowerCase();
+    }
+    // reads the form fields for `prefix` and returns the full bytes identity.
+    function deriveIdentity(prefix, label) {
+      const type = keyTypeOf(prefix);
+      if (type === "ecdsa") return buildIdentity("ecdsa", null, $(prefix + "Mat").value);
+      return buildIdentity(type, $(prefix + "Verifier").value, deriveKey(prefix, label));
+    }
+
+    // ---- WebAuthn (passkey) browser ceremonies ----
+    const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+    function _derP256(der) {
+      // minimal ASN.1 DER ECDSA-Sig-Value { INTEGER r, INTEGER s } parser
+      let i = 0;
+      if (der[i++] !== 0x30) throw new Error("bad DER sequence");
+      if (der[i] & 0x80) i += 1 + (der[i] & 0x7f); else i += 1; // skip seq length
+      const readInt = () => {
+        if (der[i++] !== 0x02) throw new Error("bad DER integer");
+        let len = der[i++];
+        let v = der.slice(i, i + len); i += len;
+        while (v.length > 0 && v[0] === 0x00) v = v.slice(1); // strip sign byte
+        return BigInt("0x" + Array.from(v).map((b) => b.toString(16).padStart(2, "0")).join(""));
+      };
+      let r = readInt(), s = readInt();
+      if (s > P256_N / 2n) s = P256_N - s; // low-s (OZ handles it too; normalise anyway)
+      return { r: "0x" + r.toString(16).padStart(64, "0"), s: "0x" + s.toString(16).padStart(64, "0") };
+    }
+    async function webauthnCreatePubkey() {
+      if (!window.PublicKeyCredential) throw new Error("WebAuthn not available in this browser/context (needs https or 127.0.0.1).");
+      const cred = await navigator.credentials.create({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: "safe-lockdown" },
+        user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "lockdown-panic", displayName: "Lockdown panic key" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256 / P-256
+        authenticatorSelection: { userVerification: "preferred" },
+        timeout: 60000,
+      }});
+      const spki = new Uint8Array(cred.response.getPublicKey()); // SPKI DER, ends with 0x04||x||y
+      const point = spki.slice(spki.length - 64);
+      return "0x" + Array.from(point).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    async function webauthnAssertion(digestHex) {
+      if (!window.PublicKeyCredential) throw new Error("WebAuthn not available (needs https or 127.0.0.1).");
+      const cred = await navigator.credentials.get({ publicKey: {
+        challenge: ethers.getBytes(digestHex),
+        userVerification: $("trigWebAuthnUV").value,
+        timeout: 60000,
+      }});
+      const resp = cred.response;
+      const authenticatorData = ethers.hexlify(new Uint8Array(resp.authenticatorData));
+      const clientStr = new TextDecoder().decode(new Uint8Array(resp.clientDataJSON));
+      const { r, s } = _derP256(new Uint8Array(resp.signature));
+      const challengeIndex = clientStr.indexOf('"challenge":"');
+      const typeIndex = clientStr.indexOf('"type":"webauthn.get"');
+      if (challengeIndex < 0 || typeIndex < 0) throw new Error("clientDataJSON missing type/challenge");
+      // flat tuple encoding (NOT abi.encode of a struct - no outer offset).
+      return ethers.AbiCoder.defaultAbiCoder().encode(
+        ["bytes32", "bytes32", "uint256", "uint256", "bytes", "string"],
+        [r, s, challengeIndex, typeIndex, authenticatorData, clientStr]
+      );
+    }
+    function unixIso(ts) { return new Date(Number(ts) * 1000).toISOString(); }
+    const STATE_NAMES = ["Uninitialised", "Normal", "LockedDown", "Recovering"];
+    function stateName(id) { return STATE_NAMES[Number(id)] || String(id); }
+
+    // ---------- tx builder ----------
+    function txBuilder(txs, name) {
+      return {
+        version: "1.0",
+        chainId: String($("chainId").value).trim(),
+        createdAt: Date.now(),
+        meta: { name, description: "Generated by safe-lockdown v1.0.0 deploy/lockdown-lifecycle.html" },
+        transactions: txs,
+      };
+    }
+    function builderTx(to, value, data, method, values, operation) {
+      return { to, value: String(value || "0"), data, operation: Number(operation || 0), contractMethod: method || null, contractInputsValues: values || null };
+    }
+    function method(name, inputs) { return { name, payable: false, inputs }; }
+    function setLast(builder, decoded) { lastBuilder = builder; log("previewOut", { decoded, transactionBuilderJson: builder }); }
+
+    // ---------- wallet / provider ----------
+    function injectedWalletHelp() {
+      const base = "No injected wallet found.";
+      if (location.protocol === "file:") {
+        return `${base} Browser wallets often do not inject into file:// pages. Serve locally from the repository root: python3 -m http.server 8765, then open http://127.0.0.1:8765/deploy/lockdown-lifecycle.html`;
+      }
+      return `${base} Check that Rabby/MetaMask is enabled for this site and reload.`;
+    }
+    function getInjectedProvider() {
+      if (selectedInjectedProvider) return selectedInjectedProvider;
+      const rabby = announcedProviders.find((i) => /rabby/i.test(`${(i.info && i.info.name) || ""} ${(i.info && i.info.rdns) || ""}`));
+      selectedInjectedProvider = rabby ? rabby.provider : window.ethereum;
+      if (!selectedInjectedProvider) throw new Error(injectedWalletHelp());
+      return selectedInjectedProvider;
+    }
+    async function connect() {
+      const injected = getInjectedProvider();
+      provider = new ethers.BrowserProvider(injected);
+      await provider.send("eth_requestAccounts", []);
+      signer = await provider.getSigner();
+      $("walletStatus").textContent = `Connected: ${await signer.getAddress()}`;
+    }
+    function getReadProvider() {
+      const rpcUrl = $("readRpcUrl").value.trim();
+      const chainId = String($("chainId").value).trim();
+      if (rpcUrl) {
+        const key = `${chainId}:${rpcUrl}`;
+        if (!readProvider || readProviderKey !== key) { readProvider = new ethers.JsonRpcProvider(rpcUrl, Number(chainId)); readProviderKey = key; }
+        return readProvider;
+      }
+      if (provider) return provider;
+      try { provider = new ethers.BrowserProvider(getInjectedProvider()); return provider; } catch (_) {}
+      throw new Error("Set a read-only RPC URL or connect a wallet");
+    }
+    async function switchNetwork() {
+      const injected = getInjectedProvider();
+      const chainId = Number($("chainId").value);
+      await injected.request({ method: "wallet_switchEthereumChain", params: [{ chainId: `0x${chainId.toString(16)}` }] });
+    }
+    function applyNetworkPreset() {
+      const n = NETWORKS[$("networkPreset").value];
+      if (!n) return;
+      $("chainId").value = n.chainId;
+      $("readRpcUrl").value = n.rpc;
+      $("multiSendCallOnly").value = n.multiSend;
+      $("safeSingleton").value = n.safeSingleton;
+      $("safeFactory").value = n.factory;
+      $("fallbackHandler").value = n.fallback;
+    }
+
+    // ---------- manifest ----------
+    function applyManifest(json, source) {
+      loadedManifest = json;
+      loadedManifestSource = source;
+      const chainId = String($("chainId").value).trim();
+      const build = json.build || {};
+      if (build.passwordVerifierCodehash && !$("expPasswordVerifierCodehash").value.trim()) $("expPasswordVerifierCodehash").value = build.passwordVerifierCodehash;
+      const webAuthnHash = boolValue("deployWebAuthnRequireUV") ? build.webAuthnVerifierCodehashRequireUVTrue : build.webAuthnVerifierCodehashRequireUVFalse;
+      if (webAuthnHash && !$("expWebAuthnVerifierCodehash").value.trim()) $("expWebAuthnVerifierCodehash").value = webAuthnHash;
+      const c = (json.chains && json.chains[chainId]) || {};
+      const setIf = (id, v) => { if (v && /^0x/.test(v) && !/FILL/i.test(v)) $(id).value = v; };
+      setIf("singleton", c.singletonAddress);
+      setIf("multiSendCallOnly", c.multiSendAddress);
+      setIf("fallbackHandler", c.fallbackHandlerAddress);
+      setIf("expSingletonCodehash", c.singletonCodehash);
+      setIf("expMultiSendCodehash", c.multiSendCodehash);
+      setIf("expFallbackHandlerCodehash", c.fallbackHandlerCodehash);
+      log("networkOut", { source, chainId, resolved: { singleton: $("singleton").value, multiSend: $("multiSendCallOnly").value, fallbackHandler: $("fallbackHandler").value, expSingletonCodehash: $("expSingletonCodehash").value, expMultiSendCodehash: $("expMultiSendCodehash").value, expFallbackHandlerCodehash: $("expFallbackHandlerCodehash").value, expPasswordVerifierCodehash: $("expPasswordVerifierCodehash").value, expWebAuthnVerifierCodehash: $("expWebAuthnVerifierCodehash").value } });
+    }
+    async function loadDefaultManifest() {
+      const path = "../deploy/manifest.json";
+      const res = await fetch(path, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Could not load ${path} (${res.status}). Serve over localhost or use the file picker.`);
+      applyManifest(await res.json(), path);
+    }
+
+    // ---------- codehash pinning (secure-by-default) ----------
+    async function codehashOf(addr, blockTag) {
+      const code = await getReadProvider().getCode(addr, blockTag);
+      if (!code || code === "0x") return null;
+      return ethers.keccak256(code);
+    }
+    function rollbackSnapshotCore(raw) {
+      if (!raw || raw.format !== "runtime-capital.safe-lockdown.preinstall-slots.v2") throw new Error("Unsupported rollback snapshot format");
+      const core = {
+        format: raw.format,
+        chainId: String(raw.chainId),
+        safe: requireAddress(raw.safe, "snapshot Safe"),
+        blockNumber: String(raw.blockNumber),
+        blockHash: String(raw.blockHash || "").toLowerCase(),
+        masterCopy: requireAddress(raw.masterCopy, "snapshot masterCopy"),
+        slots: {
+          transactionGuard: requireAddress(raw.slots && raw.slots.transactionGuard, "snapshot transaction guard"),
+          moduleGuard: requireAddress(raw.slots && raw.slots.moduleGuard, "snapshot module guard"),
+          fallbackHandler: requireAddress(raw.slots && raw.slots.fallbackHandler, "snapshot fallback handler"),
+        },
+        codehashes: {
+          transactionGuard: (raw.codehashes && raw.codehashes.transactionGuard) ? String(raw.codehashes.transactionGuard).toLowerCase() : null,
+          moduleGuard: (raw.codehashes && raw.codehashes.moduleGuard) ? String(raw.codehashes.moduleGuard).toLowerCase() : null,
+          fallbackHandler: (raw.codehashes && raw.codehashes.fallbackHandler) ? String(raw.codehashes.fallbackHandler).toLowerCase() : null,
+        },
+      };
+      if (!/^[0-9]+$/.test(core.chainId) || !/^[0-9]+$/.test(core.blockNumber)) throw new Error("Snapshot chainId/blockNumber must be decimal integers");
+      if (!/^0x[0-9a-f]{64}$/.test(core.blockHash)) throw new Error("Snapshot blockHash must be a 32-byte hex value");
+      for (const [label, hash] of Object.entries(core.codehashes)) {
+        if (hash !== null && !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new Error(`Snapshot ${label} codehash is invalid`);
+      }
+      return core;
+    }
+    function rollbackChecksum(core) {
+      return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(core)));
+    }
+    function acceptRollbackSnapshot(raw, source) {
+      const core = rollbackSnapshotCore(raw);
+      const expected = rollbackChecksum(core);
+      if (!raw.checksum || String(raw.checksum).toLowerCase() !== expected.toLowerCase()) throw new Error("Rollback snapshot checksum mismatch");
+      rollbackSnapshot = { ...core, checksum: expected };
+      log("rollbackOut", { source, snapshot: rollbackSnapshot, limits: ["Restores only the Safe's three slots.", "Does not erase Safe nonce/events or persistent Lockdown singleton state."] });
+      return rollbackSnapshot;
+    }
+    async function captureRollbackSnapshot() {
+      const p = getReadProvider();
+      const safe = requireAddress($("installSafe").value, "Safe");
+      const intendedSingleton = requireAddress($("installSingleton").value, "Lockdown singleton");
+      const intendedFallback = requireAddress($("fallbackHandler").value, "LockdownFallbackHandler");
+      const network = await p.getNetwork();
+      const chainId = String(network.chainId);
+      if (chainId !== String($("chainId").value).trim()) throw new Error(`RPC chain ${chainId} does not match selected Chain ID ${$("chainId").value.trim()}`);
+      const block = await p.getBlock("latest");
+      if (!block || block.number === null || !block.hash) throw new Error("RPC did not return a canonical block number/hash for the snapshot");
+      const blockTag = block.number;
+      const slots = {
+        transactionGuard: slotToAddress(await p.getStorage(safe, SAFE_GUARD_SLOT, blockTag)),
+        moduleGuard: slotToAddress(await p.getStorage(safe, SAFE_MODULE_GUARD_SLOT, blockTag)),
+        fallbackHandler: slotToAddress(await p.getStorage(safe, SAFE_FALLBACK_HANDLER_SLOT, blockTag)),
+      };
+      if (slots.transactionGuard.toLowerCase() === intendedSingleton.toLowerCase() || slots.moduleGuard.toLowerCase() === intendedSingleton.toLowerCase() || slots.fallbackHandler.toLowerCase() === intendedFallback.toLowerCase()) {
+        throw new Error("Refusing to call this a pre-install snapshot: at least one Lockdown slot is already installed");
+      }
+      const core = {
+        format: "runtime-capital.safe-lockdown.preinstall-slots.v2",
+        chainId,
+        safe,
+        blockNumber: String(block.number),
+        blockHash: block.hash.toLowerCase(),
+        masterCopy: slotToAddress(await p.getStorage(safe, SAFE_MASTERCOPY_SLOT, blockTag)),
+        slots,
+        codehashes: {
+          transactionGuard: slots.transactionGuard === ZERO ? null : await codehashOf(slots.transactionGuard, blockTag),
+          moduleGuard: slots.moduleGuard === ZERO ? null : await codehashOf(slots.moduleGuard, blockTag),
+          fallbackHandler: slots.fallbackHandler === ZERO ? null : await codehashOf(slots.fallbackHandler, blockTag),
+        },
+      };
+      rollbackSnapshot = { ...core, checksum: rollbackChecksum(core) };
+      log("rollbackOut", { source: "live pre-install read", snapshot: rollbackSnapshot, next: "Download this snapshot before signing the install transaction." });
+      return rollbackSnapshot;
+    }
+    function downloadRollbackSnapshot() {
+      if (!rollbackSnapshot) throw new Error("Capture or load a rollback snapshot first");
+      const blob = new Blob([JSON.stringify(rollbackSnapshot, null, 2) + "\n"], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `safe-lockdown-preinstall-${rollbackSnapshot.chainId}-${rollbackSnapshot.safe}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    async function verifyRollbackContext(stage) {
+      if (!rollbackSnapshot) throw new Error("Capture or load the pre-install rollback snapshot first");
+      const snap = acceptRollbackSnapshot(rollbackSnapshot, "in-memory");
+      const p = getReadProvider();
+      const safe = requireAddress($("installSafe").value, "Safe");
+      const singleton = requireAddress($("installSingleton").value, "Lockdown singleton");
+      const fallbackHandler = requireAddress($("fallbackHandler").value, "LockdownFallbackHandler");
+      const network = await p.getNetwork();
+      if (String(network.chainId) !== snap.chainId || String($("chainId").value).trim() !== snap.chainId) throw new Error("Snapshot, selected chain, and RPC chain do not match");
+      if (safe.toLowerCase() !== snap.safe.toLowerCase()) throw new Error("Snapshot Safe does not match the install Safe");
+      const snapshotBlock = await p.getBlock(Number(snap.blockNumber));
+      if (!snapshotBlock || !snapshotBlock.hash) throw new Error("Snapshot block header is unavailable from this RPC. Retry with a full/archive endpoint before proceeding");
+      if (snapshotBlock.hash.toLowerCase() !== snap.blockHash) throw new Error("Snapshot block hash no longer matches the canonical chain (possible reorg)");
+      const masterCopy = slotToAddress(await p.getStorage(safe, SAFE_MASTERCOPY_SLOT));
+      if (masterCopy.toLowerCase() !== snap.masterCopy.toLowerCase()) throw new Error("Safe masterCopy changed since the pre-install snapshot");
+      for (const key of ["transactionGuard", "moduleGuard", "fallbackHandler"]) {
+        const target = snap.slots[key], expected = snap.codehashes[key];
+        const actual = target === ZERO ? null : await codehashOf(target);
+        if ((actual || null)?.toLowerCase() !== (expected || null)?.toLowerCase()) throw new Error(`Restore target ${key} codehash changed since snapshot`);
+      }
+      const current = {
+        transactionGuard: slotToAddress(await p.getStorage(safe, SAFE_GUARD_SLOT)),
+        moduleGuard: slotToAddress(await p.getStorage(safe, SAFE_MODULE_GUARD_SLOT)),
+        fallbackHandler: slotToAddress(await p.getStorage(safe, SAFE_FALLBACK_HANDLER_SLOT)),
+      };
+      const eq = (a, b) => a.toLowerCase() === b.toLowerCase();
+      if (stage === 0) {
+        if (eq(snap.slots.transactionGuard, singleton) || eq(snap.slots.moduleGuard, singleton) || eq(snap.slots.fallbackHandler, fallbackHandler)) throw new Error("Snapshot is not a pre-install baseline: it already contains a Lockdown slot");
+        for (const key of ["transactionGuard", "moduleGuard", "fallbackHandler"]) {
+          if (!eq(current[key], snap.slots[key])) throw new Error(`Live ${key} changed since the pre-install snapshot; capture a new baseline`);
+        }
+        return { snap, safe, singleton, current };
+      }
+      if (stage === 1) {
+        if (!eq(current.transactionGuard, singleton) || !eq(current.moduleGuard, singleton) || !eq(current.fallbackHandler, fallbackHandler)) throw new Error("Stage 1 requires all three Lockdown slots to be installed");
+        const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+        const stateResult = await safeCall(ld, "getState", [safe], null);
+        const state = stateResult ? Number(stateResult[0]) : -1;
+        if (state !== 0 && state !== 1) throw new Error("Rollback guard deactivation is only buildable in Uninitialised or Normal state");
+        const timelockDelay = await safeCall(ld, "getTimelockDelay", [safe], 0n);
+        return { snap, safe, singleton, current, state, timelockDelay: String(timelockDelay) };
+      }
+      if (!eq(current.transactionGuard, ZERO) || !eq(current.moduleGuard, ZERO)) throw new Error(`Stage ${stage} requires both guard slots to be zero`);
+      if (stage === 2 && !eq(current.fallbackHandler, fallbackHandler)) throw new Error("Stage 2 requires the Lockdown fallback handler still installed");
+      if (stage === 3 && !eq(current.fallbackHandler, snap.slots.fallbackHandler)) throw new Error("Stage 3 requires the snapshotted fallback handler already restored");
+      return { snap, safe, singleton, current };
+    }
+    // returns { label, status: OK|FAIL|WARN, ... }
+    async function checkCodehashPin(label, addr, expected) {
+      const actual = await codehashOf(addr);
+      if (!actual) return { label, status: "FAIL", reason: "no code at address", addr };
+      if (expected && expected.trim()) {
+        const ok = actual.toLowerCase() === expected.trim().toLowerCase();
+        return { label, status: ok ? "OK" : "FAIL", actual, expected: expected.trim() };
+      }
+      if ($("allowUnpinned").checked) return { label, status: "WARN", reason: "unpinned (allow-unpinned set)", actual };
+      return { label, status: "FAIL", reason: "no expected codehash supplied - pin it or tick allow-unpinned", actual };
+    }
+
+    async function safeCall(contract, fn, args, fallback) {
+      try { return await contract[fn](...(args || [])); } catch (_) { return fallback; }
+    }
+    function slotToAddress(value) {
+      const hex = String(value || "0x").replace(/^0x/, "").padStart(64, "0");
+      return ethers.getAddress(`0x${hex.slice(-40)}`);
+    }
+    async function readGuardSlot(p, safe, getter, slot) {
+      const c = new ethers.Contract(safe, ABI.safe, p);
+      const v = await safeCall(c, getter, [], null);
+      if (v && ethers.isAddress(v) && v !== ZERO) return { address: ethers.getAddress(v), source: `${getter}()` };
+      const raw = await p.getStorage(safe, slot);
+      return { address: slotToAddress(raw), source: `${slot} slot` };
+    }
+    async function readAddressSlot(p, target, slot) {
+      return slotToAddress(await p.getStorage(target, slot));
+    }
+
+    // ============================ 1 DIAGNOSE ============================
+    async function diagnoseSafe() {
+      const p = getReadProvider();
+      const safe = requireAddress($("diagSafe").value, "Safe");
+      if ((await p.getCode(safe)) === "0x") throw new Error("No contract code at Safe address");
+      const safeC = new ethers.Contract(safe, ABI.safe, p);
+      const safeVersion = await safeCall(safeC, "VERSION", [], "unknown");
+      const masterCopy = slotToAddress(await p.getStorage(safe, SAFE_MASTERCOPY_SLOT));
+      const expectedMaster = optionalAddress($("safeSingleton").value, "Safe singleton");
+      const guardRead = await readGuardSlot(p, safe, "getGuard", SAFE_GUARD_SLOT);
+      const moduleGuardRead = await readGuardSlot(p, safe, "getModuleGuard", SAFE_MODULE_GUARD_SLOT);
+      const fallbackHandler = await readAddressSlot(p, safe, SAFE_FALLBACK_HANDLER_SLOT);
+      const singleton = optionalAddress($("singleton").value, "singleton");
+
+      let configSnapshot = null, state = null, timelockDelay = null, fallbackLockdown = null, fallbackBoundToSingleton = null, singletonMatches = null;
+      if (singleton) {
+        const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+        const snap = await safeCall(ld, "getConfigSnapshot", [safe], null);
+        if (snap) configSnapshot = { lockdownDuration: snap[0].toString(), resumeDelay: snap[1].toString(), lockdownUntil: snap[2].toString(), signersCount: Number(snap[3]), recoveryOwnerAllowlistCount: snap[4].toString() };
+        const st = await safeCall(ld, "getState", [safe], null);
+        if (st) state = { state: stateName(st[0]), secondsRemaining: st[1].toString() };
+        const td = await safeCall(ld, "getTimelockDelay", [safe], null);
+        timelockDelay = td === null ? null : td.toString();
+        if (fallbackHandler !== ZERO) {
+          const handler = new ethers.Contract(fallbackHandler, ABI.handler, p);
+          fallbackLockdown = await safeCall(handler, "LOCKDOWN", [], null);
+          if (fallbackLockdown) fallbackLockdown = ethers.getAddress(fallbackLockdown);
+        }
+        fallbackBoundToSingleton = fallbackLockdown !== null && fallbackLockdown.toLowerCase() === singleton.toLowerCase();
+        singletonMatches = [guardRead.address, moduleGuardRead.address].every((g) => g.toLowerCase() === singleton.toLowerCase()) && fallbackBoundToSingleton;
+      }
+
+      const recs = [];
+      if (safeVersion !== REQUIRED_SAFE_VERSION) recs.push(`Safe is ${safeVersion}, not v1.5.0. Upgrade before installing Lockdown (module-path is unguarded on <1.5.0).`);
+      if (expectedMaster && masterCopy.toLowerCase() !== expectedMaster.toLowerCase()) recs.push(`Safe masterCopy ${masterCopy} is NOT the canonical v1.5.0 singleton ${expectedMaster}. Do not trust guard hooks until this matches.`);
+      if (!singleton) recs.push("Set the Lockdown singleton in the Network panel (from manifest) to read per-Safe config.");
+      else if (guardRead.address === ZERO && moduleGuardRead.address === ZERO && fallbackHandler === ZERO) recs.push("No Lockdown slots installed. Build initialize() (step 3) then install guard + module guard + fallback handler (step 4).");
+      else if (guardRead.address.toLowerCase() !== moduleGuardRead.address.toLowerCase()) recs.push("Transaction guard and module guard DIFFER - both must be the singleton. Review/repair.");
+      else if (!fallbackBoundToSingleton) recs.push("Fallback handler is missing or not bound to this singleton. Repair before relying on ERC-1271 lockdown coverage.");
+      else if (singletonMatches && configSnapshot && Number(configSnapshot.signersCount) === 0) recs.push("Singleton installed but signersCount == 0: Safe is DORMANT (cannot panic). Approve a verifier and add a signer (step 5).");
+      else if (singletonMatches && timelockDelay === "0") recs.push("Singleton installed but timelockDelay == 0: NO coercion resistance (INV-LIVE-1). Consider step 6.");
+      else if (singletonMatches) recs.push("Singleton installed as transaction guard, module guard and fallback handler gate. Verify signers and timelock in steps 5/6.");
+      else recs.push("A non-singleton guard is installed. Migration requires explicit removal/replacement.");
+
+      const report = { safe, safeVersion, safeVersionOk: safeVersion === REQUIRED_SAFE_VERSION, masterCopy, masterCopyOk: !expectedMaster || masterCopy.toLowerCase() === expectedMaster.toLowerCase(), guard: guardRead.address, guardSource: guardRead.source, moduleGuard: moduleGuardRead.address, moduleGuardSource: moduleGuardRead.source, fallbackHandler, fallbackLockdown, fallbackBoundToSingleton, installedAsAllThree: Boolean(singletonMatches), singleton, singletonMatches, configSnapshot, state, timelockDelay, recommendations: recs };
+      lastDiagnostic = report;
+      // prefill
+      for (const id of ["initSafe", "installSafe", "sigSafe", "tlSafe", "trigSafe", "stateSafe", "recSafe", "janSafe"]) $(id).value = safe;
+      if (singleton) for (const id of ["installSingleton", "sigSingleton", "tlSingleton", "prmSingleton", "trigSingleton", "stateSingleton", "recSingleton", "janSingleton"]) $(id).value = singleton;
+      log("diagnosticOut", report);
+    }
+
+    // ============================ 2 INFRA DEPLOY ============================
+    function readArtifactBytecode(json, source) {
+      const bc = json.bytecode && json.bytecode.object ? json.bytecode.object : json.bytecode;
+      if (!bc || !bc.startsWith("0x")) throw new Error(`${source} has no creation bytecode`);
+      return bc;
+    }
+    async function loadArtifacts() {
+      const out = {};
+      for (const [path, set] of [
+        ["../out/LockdownTimelock.sol/LockdownTimelock.json", (b) => (singletonArtifactBytecode = b)],
+        ["../out/PasswordVerifier.sol/PasswordVerifier.json", (b) => (passwordVerifierArtifactBytecode = b)],
+        ["../out/WebAuthnVerifier.sol/WebAuthnVerifier.json", (b) => (webauthnVerifierArtifactBytecode = b)],
+        ["../out/WebAuthnVerifier.sol/WebAuthnVerifierNoUV.json", (b) => (webauthnVerifierNoUVArtifactBytecode = b)],
+      ]) {
+        try { const res = await fetch(path, { cache: "no-store" }); if (!res.ok) throw new Error(`${res.status}`); const bc = readArtifactBytecode(await res.json(), path); set(bc); out[path] = `${bc.length / 2 - 1} bytes`; }
+        catch (e) { out[path] = `failed: ${e.message}. Run 'forge build' and serve over localhost, or paste bytecode.`; }
+      }
+      log("infraOut", out);
+    }
+    // Both bundled verifiers are constructor-free: the WebAuthn UV policy is a
+    // compile-time constant, so the policy picks the CONTRACT, not an argument.
+    async function deployArtifact(label, textareaId, artifactGetter, fillId) {
+      const bc = ($(textareaId).value.trim() || artifactGetter()).trim();
+      if (!bc.startsWith("0x")) { await loadArtifacts(); }
+      const code = ($(textareaId).value.trim() || artifactGetter()).trim();
+      if (!code.startsWith("0x")) throw new Error(`Load ${label} artifact or paste bytecode`);
+      if (!signer) await connect();
+      const f = new ethers.ContractFactory([], code, signer);
+      const c = await f.deploy();
+      const addr = await c.getAddress();
+      if (fillId) $(fillId).value = addr;
+      log("infraOut", { deployed: label, address: addr, txHash: c.deploymentTransaction().hash });
+    }
+    async function deployPasswordVerifier() { return deployArtifact("PasswordVerifier", "passwordVerifierBytecode", () => passwordVerifierArtifactBytecode, null); }
+    async function deployWebAuthnVerifier() {
+      const requireUV = boolValue("deployWebAuthnRequireUV");
+      const label = requireUV ? "WebAuthnVerifier" : "WebAuthnVerifierNoUV";
+      return deployArtifact(label, "webauthnVerifierBytecode", () => (requireUV ? webauthnVerifierArtifactBytecode : webauthnVerifierNoUVArtifactBytecode), null);
+    }
+    async function deploySingleton() {
+      const code = ($("singletonBytecode").value.trim() || singletonArtifactBytecode).trim();
+      if (!code.startsWith("0x")) throw new Error("Load Lockdown artifact or paste bytecode");
+      const multiSend = requireAddress($("multiSendCallOnly").value, "MultiSendCallOnly");
+      if (!signer) await connect();
+      const f = new ethers.ContractFactory(ABI.lockdown, code, signer);
+      const c = await f.deploy(multiSend);
+      const addr = await c.getAddress();
+      $("singleton").value = addr;
+      log("infraOut", { singleton: addr, multiSendCallOnly: multiSend, txHash: c.deploymentTransaction().hash, note: "Read its codehash and record it in deploy/manifest.json." });
+    }
+    async function readCodehashes() {
+      const out = {};
+      for (const [k, id] of [["singleton", "singleton"], ["selectedVerifier", "sigVerifier"], ["multiSendCallOnly", "multiSendCallOnly"]]) {
+        const a = optionalAddress($(id).value, k);
+        out[k] = a ? { address: a, codehash: await codehashOf(a) } : "not set";
+      }
+      log("infraOut", out);
+    }
+
+    // ============================ 3 INITIALIZE ============================
+    // Each row -> a single ERC-7913 bytes identity:
+    //   0xPanicAddress                      -> ecdsa identity (the 20-byte address; no verifier)
+    //   password,0xVerifier,secret          -> verifier(20) || keccak256(utf8(secret))(32)
+    //   webauthn,0xVerifier,0x<128hex>      -> verifier(20) || (qx||qy)(64)
+    function parseInitialSigners(text) {
+      const rows = text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      return rows.map((row, i) => {
+        const parts = row.split(",").map((x) => x.trim()).filter(Boolean);
+        if (parts.length === 1) {
+          return { scheme: "ecdsa", verifier: null, identity: buildIdentity("ecdsa", null, parts[0]) };
+        }
+        if (parts.length === 3) {
+          const scheme = parts[0].toLowerCase(), verifier = parts[1], material = parts[2];
+          if (scheme !== "password" && scheme !== "webauthn") throw new Error(`initialSigners[${i}]: 3-field rows must be password,0xVerifier,secret or webauthn,0xVerifier,0x<128hex> (an ecdsa identity is a bare 0xAddress with no verifier)`);
+          const key = scheme === "password" ? passwordCommitment(material) : webauthnPubkey(material, `initialSigners[${i}].key`);
+          return { scheme, verifier: requireAddress(verifier, `initialSigners[${i}].verifier`), identity: buildIdentity(scheme, verifier, key) };
+        }
+        throw new Error(`initialSigners[${i}]: use 0xPanicAddress (ecdsa), or scheme,0xVerifier,material (password/webauthn)`);
+      });
+    }
+    async function buildInitialize() {
+      const safe = requireAddress($("initSafe").value, "Safe");
+      const duration = numeric($("initDuration").value, "duration");
+      const resumeDelay = numeric($("initResumeDelay").value, "resume delay");
+      const recoveryOwners = linesToAddresses($("initRecoveryOwners").value, "recoveryOwners");
+      if (recoveryOwners.length === 0) throw new Error("At least one recovery owner is required (contract reverts RecoveryOwners_EmptyAllowlist).");
+      const signers = parseInitialSigners($("initSigners").value);
+      if (signers.some((s) => s.scheme === "password") && !$("initAckPasswordRisk").checked) throw new Error("Acknowledge the one-time-password disclosure/front-running model before registering a password signer in initialize().");
+      for (const signerConfig of signers) {
+        if (signerConfig.verifier) await assertVerifierPinned(signerConfig.scheme, signerConfig.verifier, `initial ${signerConfig.scheme} verifier`);
+      }
+
+      const data = iface.lockdown.encodeFunctionData("initialize", [duration, resumeDelay, recoveryOwners, signers.map((s) => s.identity)]);
+      lastInitializeData = { safe, data };
+      const warnings = [];
+      if (recoveryOwners.length === 1) warnings.push("Only one recovery owner: contract minimum is 1, runbook recommends >= 2 distinct cold backups.");
+      if (signers.length === 0) warnings.push("Zero initial signers: Safe will be installed but DORMANT until you add a signer in step 5.");
+      const timelockAfter = $("initTimelockDelay").value.trim();
+      if (timelockAfter && timelockAfter !== "0") warnings.push(`After install, set timelockDelay=${timelockAfter}s via step 6 (it cannot be part of initialize).`);
+      log("initOut", { action: "initialize", safe, decoded: { lockdownDuration: duration.toString(), resumeDelay: resumeDelay.toString(), recoveryOwners, initialSigners: signers }, warnings, data });
+    }
+
+    // ============================ 4 INSTALL ============================
+    async function buildInstall() {
+      const p = getReadProvider();
+      const safe = requireAddress($("installSafe").value, "Safe");
+      const singleton = requireAddress($("installSingleton").value, "singleton");
+      const multiSend = requireAddress($("multiSendCallOnly").value, "MultiSendCallOnly");
+      const fallbackHandler = requireAddress($("fallbackHandler").value, "LockdownFallbackHandler");
+      const includeInit = $("installIncludeInit").checked;
+      if (!rollbackSnapshot) throw new Error("Capture and download the pre-install rollback snapshot before building the install batch");
+      const rollbackCore = rollbackSnapshotCore(rollbackSnapshot);
+      if (rollbackChecksum(rollbackCore).toLowerCase() !== String(rollbackSnapshot.checksum || "").toLowerCase()) throw new Error("Rollback snapshot checksum mismatch");
+      if (rollbackCore.safe.toLowerCase() !== safe.toLowerCase() || rollbackCore.chainId !== String($("chainId").value).trim()) throw new Error("Rollback snapshot does not match this Safe and chain");
+      await verifyRollbackContext(0);
+
+      // ---- read-only preflight ----
+      const checks = [];
+      if ((await p.getCode(safe)) === "0x") checks.push({ label: "Safe has code", status: "FAIL" });
+      const safeC = new ethers.Contract(safe, ABI.safe, p);
+      const safeVersion = await safeCall(safeC, "VERSION", [], null);
+      checks.push({ label: "Safe VERSION == 1.5.0", status: safeVersion === REQUIRED_SAFE_VERSION ? "OK" : "FAIL", actual: safeVersion });
+      const masterCopy = slotToAddress(await p.getStorage(safe, SAFE_MASTERCOPY_SLOT));
+      const expectedMaster = optionalAddress($("safeSingleton").value, "Safe singleton");
+      checks.push({ label: "Safe masterCopy == canonical singleton", status: expectedMaster ? (masterCopy.toLowerCase() === expectedMaster.toLowerCase() ? "OK" : "FAIL") : "WARN", actual: masterCopy, expected: expectedMaster || "(not set)" });
+      checks.push(await checkCodehashPin("Singleton EXTCODEHASH pin", singleton, $("expSingletonCodehash").value));
+      checks.push(await checkCodehashPin("MultiSendCallOnly EXTCODEHASH pin", multiSend, $("expMultiSendCodehash").value));
+      checks.push(await checkCodehashPin("LockdownFallbackHandler EXTCODEHASH pin", fallbackHandler, $("expFallbackHandlerCodehash").value));
+      const handler = new ethers.Contract(fallbackHandler, ABI.handler, p);
+      const handlerLockdown = await safeCall(handler, "LOCKDOWN", [], null);
+      checks.push({ label: "FallbackHandler LOCKDOWN == singleton", status: handlerLockdown && handlerLockdown.toLowerCase() === singleton.toLowerCase() ? "OK" : "FAIL", actual: handlerLockdown, expected: singleton });
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const sv = await safeCall(ld, "VERSION", [], null);
+      checks.push({ label: "Singleton VERSION == 1.0.0", status: sv === SINGLETON_VERSION ? "OK" : "FAIL", actual: sv });
+      const msOnSingleton = await safeCall(ld, "MULTI_SEND_CALL_ONLY", [], ZERO);
+      checks.push({ label: "Singleton MULTI_SEND_CALL_ONLY == manifest", status: msOnSingleton.toLowerCase() === multiSend.toLowerCase() ? "OK" : "FAIL", actual: msOnSingleton, expected: multiSend });
+      // Mirror scripts/preflight-install-v1.sh: the EIP-712 domain must bind this
+      // singleton, version and name (anti-mis-deployment).
+      const dom = await safeCall(ld, "eip712Domain", [], null);
+      checks.push({
+        label: "Singleton eip712Domain (name/version/verifyingContract)",
+        status: dom
+          ? (dom.verifyingContract.toLowerCase() === singleton.toLowerCase() && dom.name === "RuntimeLockdown" && dom.version === SINGLETON_VERSION ? "OK" : "FAIL")
+          : "FAIL",
+        actual: dom ? `${dom.name}/${dom.version}/${dom.verifyingContract}` : "unreadable",
+        expected: `RuntimeLockdown/${SINGLETON_VERSION}/${singleton}`
+      });
+      checks.push({ label: "Singleton supports TxGuard iface", status: (await safeCall(ld, "supportsInterface", [TX_GUARD_IFACE], false)) ? "OK" : "FAIL" });
+      checks.push({ label: "Singleton supports ModuleGuard iface", status: (await safeCall(ld, "supportsInterface", [MODULE_GUARD_IFACE], false)) ? "OK" : "FAIL" });
+      const modulesPage = await safeCall(safeC, "getModulesPaginated", [SENTINEL_MODULES, 100], null);
+      if (!modulesPage) {
+        checks.push({ label: "Enabled Safe modules", status: "FAIL", note: "getModulesPaginated failed; inspect modules before install." });
+      } else {
+        const modules = Array.from(modulesPage[0] || []).map((m) => ethers.getAddress(m));
+        checks.push({
+          label: "Enabled Safe modules",
+          status: modules.length === 0 ? "OK" : "FAIL",
+          actual: modules.length ? modules.join(", ") : "none",
+          note: modules.length ? "VET each module before install; browser install is fail-closed when modules are already enabled (T-INSTALL-1)." : undefined
+        });
+      }
+      const snap = await safeCall(ld, "getConfigSnapshot", [safe], null);
+      const alreadyInit = snap ? Number(snap[0]) > 0 : false;
+      if (includeInit && alreadyInit) checks.push({ label: "Safe not already initialised", status: "FAIL", note: "initialize would revert InvalidState (already initialised); uncheck include-initialize." });
+      if (!includeInit && !alreadyInit) checks.push({ label: "Safe already initialised", status: "FAIL", note: "include-initialize is unchecked but the Safe has no config; guards would pass-through (anti-brick) until initialize runs." });
+
+      const failures = checks.filter((c) => c.status === "FAIL");
+      log("installOut", { safe, singleton, multiSend, fallbackHandler, checks, failures: failures.map((f) => f.label) });
+      if (failures.length) throw new Error(`Install preflight failed: ${failures.map((f) => f.label).join("; ")}`);
+
+      // ---- build atomic batch ----
+      const txs = [];
+      txs.push(builderTx(safe, 0, iface.safe.encodeFunctionData("setGuard", [singleton]), method("setGuard", [{ name: "guard", type: "address", internalType: "address" }]), { guard: singleton }, 0));
+      txs.push(builderTx(safe, 0, iface.safe.encodeFunctionData("setModuleGuard", [singleton]), method("setModuleGuard", [{ name: "moduleGuard", type: "address", internalType: "address" }]), { moduleGuard: singleton }, 0));
+      txs.push(builderTx(safe, 0, iface.safe.encodeFunctionData("setFallbackHandler", [fallbackHandler]), method("setFallbackHandler", [{ name: "handler", type: "address", internalType: "address" }]), { handler: fallbackHandler }, 0));
+      if (includeInit) {
+        if (!lastInitializeData || lastInitializeData.safe.toLowerCase() !== safe.toLowerCase()) throw new Error("Build initialize() for this Safe in step 3 first (or uncheck include-initialize).");
+        txs.push(builderTx(singleton, 0, lastInitializeData.data, null, null, 0));
+      }
+      setLast(txBuilder(txs, includeInit ? "Install Lockdown v1.0.0 (setGuard + setModuleGuard + setFallbackHandler + initialize)" : "Install Lockdown v1.0.0 slots"), { action: "install", safe, singleton, fallbackHandler, rollbackSnapshotChecksum: rollbackSnapshot.checksum, atomic: "Safe{Wallet} batches these into one execTransaction (MultiSend), so no asymmetric intermediate state is observable.", lifecycle: "Installed/initialised is not the same as armed. Configure signers, timelock and bypassers in separate reviewed transactions, then verify on-chain.", includeInitialize: includeInit });
+    }
+    async function buildRemoveGuards() {
+      const ctx = await verifyRollbackContext(1);
+      const txs = [
+        builderTx(ctx.safe, 0, iface.safe.encodeFunctionData("setModuleGuard", [ZERO]), method("setModuleGuard", [{ name: "moduleGuard", type: "address", internalType: "address" }]), { moduleGuard: ZERO }, 0),
+        builderTx(ctx.safe, 0, iface.safe.encodeFunctionData("setGuard", [ZERO]), method("setGuard", [{ name: "guard", type: "address", internalType: "address" }]), { guard: ZERO }, 0),
+      ];
+      setLast(txBuilder(txs, "Rollback stage 1 - deactivate Lockdown guards"), { action: "rollback-stage-1-deactivate-lockdown", safe: ctx.safe, snapshotChecksum: ctx.snap.checksum, currentState: ctx.state, timelockDelay: ctx.timelockDelay, warning: ctx.timelockDelay !== "0" ? "This Safe transaction must first be scheduled and must wait the active timelock delay. Never use the bypasser for guard removal." : "Lockdown transaction/module protection ends when this stage executes. Continue immediately with stages 2 and 3." });
+    }
+    async function buildRestoreFallback() {
+      const ctx = await verifyRollbackContext(2);
+      const handler = ctx.snap.slots.fallbackHandler;
+      const tx = builderTx(ctx.safe, 0, iface.safe.encodeFunctionData("setFallbackHandler", [handler]), method("setFallbackHandler", [{ name: "handler", type: "address", internalType: "address" }]), { handler }, 0);
+      setLast(txBuilder([tx], "Rollback stage 2 - restore previous fallback handler"), { action: "rollback-stage-2-restore-fallback", safe: ctx.safe, fallbackHandler: handler, snapshotChecksum: ctx.snap.checksum, warning: "Both guard slots must remain zero until this transaction has executed and been verified." });
+    }
+    async function buildRestoreGuards() {
+      const ctx = await verifyRollbackContext(3);
+      const txs = [
+        builderTx(ctx.safe, 0, iface.safe.encodeFunctionData("setModuleGuard", [ctx.snap.slots.moduleGuard]), method("setModuleGuard", [{ name: "moduleGuard", type: "address", internalType: "address" }]), { moduleGuard: ctx.snap.slots.moduleGuard }, 0),
+        builderTx(ctx.safe, 0, iface.safe.encodeFunctionData("setGuard", [ctx.snap.slots.transactionGuard]), method("setGuard", [{ name: "guard", type: "address", internalType: "address" }]), { guard: ctx.snap.slots.transactionGuard }, 0),
+      ];
+      setLast(txBuilder(txs, "Rollback stage 3 - restore previous guards"), { action: "rollback-stage-3-restore-guards", safe: ctx.safe, moduleGuard: ctx.snap.slots.moduleGuard, transactionGuard: ctx.snap.slots.transactionGuard, transactionGuardInstalledLast: true, snapshotChecksum: ctx.snap.checksum, residualState: "Safe nonce/events and Lockdown singleton per-Safe state remain; exact historical rollback is impossible." });
+    }
+
+    // ============================ 5 VERIFIERS & SIGNERS ============================
+    async function refreshSignerStatus() {
+      const p = getReadProvider();
+      const safe = requireAddress($("sigSafe").value, "Safe");
+      const singleton = requireAddress($("sigSingleton").value, "singleton");
+      const type = keyTypeOf("sig");
+      const identity = deriveIdentity("sig", "panic identity");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const isSigner = await safeCall(ld, "isLockdownSigner", [safe, identity], false);
+      const burnt = await safeCall(ld, "isSignerBurntPermanently", [safe, identity], false);
+      let verifier = null, verifierCodehash = null, expVerifier = null, verifierPinOk = null;
+      if (type !== "ecdsa") {
+        verifier = requireAddress($("sigVerifier").value, "verifier");
+        verifierCodehash = await codehashOf(verifier);
+        expVerifier = expectedVerifierCodehash(type);
+        verifierPinOk = expVerifier ? (verifierCodehash || "").toLowerCase() === expVerifier.toLowerCase() : null;
+      }
+      const verifierAllowed = type === "ecdsa" || verifierPinOk === true || $("allowUnpinned").checked;
+      $("buildAddSigner").disabled = burnt || isSigner || !verifierAllowed;
+      log("signerOut", { safe, scheme: type, verifier, identity, isLockdownSigner: isSigner, isSignerBurntPermanently: burnt, verifierCodehash, expectedVerifierCodehash: expVerifier || null, verifierCodehashPinned: verifierPinOk, addSignerEnabled: !$("buildAddSigner").disabled, notes: [burnt ? "This identity is permanently burnt - pick fresh material." : null, type !== "ecdsa" && !expVerifier && !$("allowUnpinned").checked ? "No expected verifier codehash is loaded. Production mode refuses to build the add transaction." : null, verifierPinOk === false ? "Verifier codehash mismatch. Production mode refuses to build the add transaction." : null].filter(Boolean) });
+    }
+    function expectedVerifierCodehash(type) {
+      const id = type === "password" ? "expPasswordVerifierCodehash" : type === "webauthn" ? "expWebAuthnVerifierCodehash" : null;
+      return id && $(id) ? $(id).value.trim() : "";
+    }
+    async function assertVerifierPinned(type, verifier, label) {
+      if (type === "ecdsa") return null;
+      const actual = await codehashOf(requireAddress(verifier, label || "verifier"));
+      if (!actual) throw new Error(`${label || "Verifier"} has no contract code`);
+      const expected = expectedVerifierCodehash(type);
+      if (!expected) {
+        if ($("allowUnpinned").checked) return { actual, expected: null, warning: "unpinned dev/test override" };
+        throw new Error(`No expected ${type} verifier codehash is loaded. Load the release manifest or use the dev/test-only unpinned override.`);
+      }
+      if (actual.toLowerCase() !== expected.toLowerCase()) throw new Error(`${label || "Verifier"} codehash ${actual} does not match expected ${expected}`);
+      return { actual, expected };
+    }
+    async function buildAddSigner() {
+      const singleton = requireAddress($("sigSingleton").value, "singleton");
+      const type = keyTypeOf("sig");
+      if (type === "password" && !$("ackPasswordRisk").checked) throw new Error("Acknowledge the one-time-password disclosure/front-running model before adding a password signer");
+      if (type !== "ecdsa") await assertVerifierPinned(type, $("sigVerifier").value, `${type} verifier`);
+      const identity = deriveIdentity("sig", "panic identity");
+      const data = iface.lockdown.encodeFunctionData("addLockdownSigner", [identity]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("addLockdownSigner", [{ name: "signer", type: "bytes", internalType: "bytes" }]), { signer: identity })], "addLockdownSigner"), { action: "addLockdownSigner", singleton, scheme: type, signer: identity });
+    }
+    function buildRemoveSigner() {
+      const singleton = requireAddress($("sigSingleton").value, "singleton");
+      const identity = deriveIdentity("sig", "panic identity");
+      const data = iface.lockdown.encodeFunctionData("removeLockdownSigner", [identity]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("removeLockdownSigner", [{ name: "signer", type: "bytes", internalType: "bytes" }]), { signer: identity })], "removeLockdownSigner"), { action: "removeLockdownSigner", singleton, scheme: keyTypeOf("sig"), signer: identity, note: "Permanently burns this identity; re-arm with fresh material." });
+    }
+    async function buildRotateSigner() {
+      const singleton = requireAddress($("sigSingleton").value, "singleton");
+      const newType = keyTypeOf("sigRot");
+      if (newType === "password" && !$("ackPasswordRisk").checked) throw new Error("Acknowledge the one-time-password disclosure/front-running model before rotating to a password signer");
+      if (newType !== "ecdsa") await assertVerifierPinned(newType, $("sigRotVerifier").value, `new ${newType} verifier`);
+      const oldSigner = deriveIdentity("sig", "old panic identity");
+      const newSigner = deriveIdentity("sigRot", "new panic identity");
+      const data = iface.lockdown.encodeFunctionData("rotateLockdownSigner", [oldSigner, newSigner]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("rotateLockdownSigner", [{ name: "oldSigner", type: "bytes", internalType: "bytes" }, { name: "newSigner", type: "bytes", internalType: "bytes" }]), { oldSigner, newSigner })], "rotateLockdownSigner"), { action: "rotateLockdownSigner", singleton, oldSigner, newSigner });
+    }
+    async function listSigners() {
+      const p = getReadProvider();
+      const safe = requireAddress($("sigSafe").value, "Safe");
+      const singleton = requireAddress($("sigSingleton").value, "singleton");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const signers = await ld.getLockdownSigners(safe);
+      const live = signers.map((s) => ({ identity: s, lengthBytes: (s.length - 2) / 2 }));
+      log("signerOut", { safe, signersCount: signers.length, liveSigners: live, note: signers.length === 0 ? "No signer registered: Safe is DORMANT (cannot panic)." : undefined });
+    }
+
+    // ============================ 6 TIMELOCK ============================
+    function buildSetTimelock() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const delay = numeric($("tlDelay").value, "timelock delay");
+      const data = iface.lockdown.encodeFunctionData("setTimelockDelay", [delay]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("setTimelockDelay", [{ name: "newDelay", type: "uint64", internalType: "uint64" }]), { newDelay: delay.toString() })], "setTimelockDelay"), { action: "setTimelockDelay", singleton, newDelay: delay.toString(), note: delay === 0n ? "Turning the timelock OFF is itself timelocked once active (only the first 0->N is free)." : "First 0->N activation is free; later changes are scheduled + waited." });
+    }
+    function buildSetBypasser() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const bypasser = requireAddress($("tlBypasser").value, "bypasser");
+      const enabled = boolValue("tlBypasserEnabled");
+      const data = iface.lockdown.encodeFunctionData("setTimelockBypasser", [bypasser, enabled]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("setTimelockBypasser", [{ name: "bypasser", type: "address", internalType: "address" }, { name: "allowed", type: "bool", internalType: "bool" }]), { bypasser, allowed: String(enabled) })], "setTimelockBypasser"), { action: "setTimelockBypasser", singleton, bypasser, enabled, warning: "HSM compromise = full bypass authority. Off-chain policy MUST refuse bypasses for disarm/setGuard/migration." });
+    }
+    function annTuple() {
+      return {
+        to: requireAddress($("annTo").value, "to"),
+        value: numeric($("annValue").value, "value"),
+        data: hexData($("annData").value, "data"),
+        operation: Number($("annOp").value),
+        safeTxGas: numeric($("annSafeTxGas").value, "safeTxGas"),
+        baseGas: numeric($("annBaseGas").value, "baseGas"),
+        gasPrice: numeric($("annGasPrice").value, "gasPrice"),
+        gasToken: $("annGasToken").value.trim() ? requireAddress($("annGasToken").value, "gasToken") : ZERO,
+        refundReceiver: $("annRefundReceiver").value.trim() ? requireAddress($("annRefundReceiver").value, "refundReceiver") : ZERO,
+      };
+    }
+    async function computeSafeTxHash() {
+      const p = getReadProvider();
+      const safe = requireAddress($("tlSafe").value, "Safe");
+      const t = annTuple();
+      const safeC = new ethers.Contract(safe, ABI.safe, p);
+      let nonce = $("annNonce").value.trim();
+      nonce = nonce ? numeric(nonce, "nonce") : await safeC.nonce();
+      const hash = await safeC.getTransactionHash(t.to, t.value, t.data, t.operation, t.safeTxGas, t.baseGas, t.gasPrice, t.gasToken, t.refundReceiver, nonce);
+      $("annNonce").value = nonce.toString();
+      log("timelockOut", { action: "computeSafeTxHash", safe, nonce: nonce.toString(), safeTxHash: hash, note: "scheduleTransaction verifies the full Safe tx/signatures for this hash; cancel/bypass still use the hash directly." });
+      return hash;
+    }
+    async function buildCancelOwner() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const hash = await computeSafeTxHash();
+      const data = iface.lockdown.encodeFunctionData("cancelTransaction", [hash]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("cancelTransaction", [{ name: "safeTxHash", type: "bytes32", internalType: "bytes32" }]), { safeTxHash: hash })], "cancelTransaction"), { action: "cancelTransaction", singleton, safeTxHash: hash });
+    }
+    async function buildScheduleOwner() {
+      const p = getReadProvider();
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const safe = requireAddress($("tlSafe").value, "Safe");
+      const params = annTuple();
+      const safeC = new ethers.Contract(safe, ABI.safe, p);
+      let nonce = $("annNonce").value.trim();
+      nonce = nonce ? numeric(nonce, "nonce") : await safeC.nonce();
+      $("annNonce").value = nonce.toString();
+      const signatures = hexData($("annSignatures").value, "Safe signatures");
+      if (signatures === "0x") throw new Error("Safe signatures must not be empty");
+      const data = iface.lockdown.encodeFunctionData("scheduleTransaction", [safe, nonce, params, signatures]);
+      setLast({
+        type: "direct-call",
+        to: singleton,
+        value: "0",
+        data,
+        function: "scheduleTransaction(address,uint256,(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address),bytes)",
+        args: {
+          safe,
+          nonce: nonce.toString(),
+          params: { ...params, value: params.value.toString(), safeTxGas: params.safeTxGas.toString(), baseGas: params.baseGas.toString(), gasPrice: params.gasPrice.toString() },
+          signatures,
+        },
+        from: "any relayer EOA or service",
+      }, {
+        action: "scheduleTransaction",
+        singleton,
+        safe,
+        nonce: nonce.toString(),
+        note: "Permissionless direct call. The contract verifies the packed Safe signatures without consuming the Safe nonce. Do NOT import this call into Safe{Wallet}.",
+      });
+    }
+    function modTuple() {
+      return { module: requireAddress($("modModule").value, "module"), to: requireAddress($("modTo").value, "to"), value: numeric($("modValue").value, "value"), data: hexData($("modData").value, "data"), operation: 0 };
+    }
+    function buildScheduleModule() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const m = modTuple();
+      const data = iface.lockdown.encodeFunctionData("scheduleModuleTransaction", [m.module, m.to, m.value, m.data, m.operation]);
+      setLast(txBuilder([builderTx(singleton, 0, data, null, null)], "scheduleModuleTransaction"), { action: "scheduleModuleTransaction", singleton, ...m, value: m.value.toString(), note: "No module-path bypass exists. Module DELEGATECALL is rejected (operation forced to CALL)." });
+    }
+    async function computeModuleTxHash(singleton, safe, m) {
+      const p = getReadProvider();
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      return await ld.getModuleTransactionHash(safe, m.module, m.to, m.value, m.data, m.operation);
+    }
+    async function buildCancelModule() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const safe = requireAddress($("tlSafe").value, "Safe");
+      const m = modTuple();
+      const moduleTxHash = await computeModuleTxHash(singleton, safe, m);
+      const data = iface.lockdown.encodeFunctionData("cancelModuleTransaction", [moduleTxHash]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("cancelModuleTransaction", [{ name: "moduleTxHash", type: "bytes32", internalType: "bytes32" }]), { moduleTxHash })], "cancelModuleTransaction"), { action: "cancelModuleTransaction", singleton, safe, moduleTxHash, ...m, value: m.value.toString() });
+    }
+    async function buildBypassTimelock() {
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const safe = requireAddress($("tlSafe").value, "Safe");
+      const hash = await computeSafeTxHash();
+      const data = iface.lockdown.encodeFunctionData("bypassTimelock", [safe, hash]);
+      setLast({ type: "direct-call", to: singleton, value: "0", data, function: "bypassTimelock(address,bytes32)", args: { safe, safeTxHash: hash }, from: "MUST be an allowlisted timelock bypasser" }, { action: "bypassTimelock", singleton, safe, safeTxHash: hash, warning: "Direct HSM/bypasser call only. Do NOT import this into Safe{Wallet}; msg.sender must be the allowlisted bypasser. Off-chain policy MUST refuse this for disarm / setGuard / migration txs." });
+    }
+    async function readTimelockState() {
+      const p = getReadProvider();
+      const safe = requireAddress($("tlSafe").value, "Safe");
+      const singleton = requireAddress($("tlSingleton").value, "singleton");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const delay = await ld.getTimelockDelay(safe);
+      const out = { safe, timelockDelay: delay.toString(), coercionResistant: delay > 0n };
+      try { const bypasser = optionalAddress($("tlBypasser").value, "bypasser"); if (bypasser) out.bypasser = { address: bypasser, isTimelockBypasser: await ld.isTimelockBypasser(safe, bypasser) }; } catch (_) {}
+      try { const hash = await computeSafeTxHash(); const at = await ld.getTransactionExecutableAt(safe, hash); out.ownerTicket = { safeTxHash: hash, executableAt: at.toString(), executableAtIso: at > 0n ? unixIso(at) : null }; } catch (_) {}
+      try { const m = modTuple(); const mh = await ld.getModuleTransactionHash(safe, m.module, m.to, m.value, m.data, m.operation); const at = await ld.getModuleTransactionExecutableAt(safe, mh); out.moduleTicket = { moduleTxHash: mh, executableAt: at.toString(), executableAtIso: at > 0n ? unixIso(at) : null }; } catch (_) {}
+      log("timelockOut", out);
+    }
+
+    // ============================ 6b PARAMS ============================
+    function buildParam(kind) {
+      const singleton = requireAddress($("prmSingleton").value, "singleton");
+      let data, m, vals, decoded;
+      if (kind === "duration") {
+        const v = numeric($("prmDuration").value, "duration");
+        data = iface.lockdown.encodeFunctionData("setLockdownDuration", [v]);
+        m = method("setLockdownDuration", [{ name: "newDuration", type: "uint64", internalType: "uint64" }]); vals = { newDuration: v.toString() };
+        decoded = { action: "setLockdownDuration", singleton, newDuration: v.toString() };
+      } else if (kind === "resumeDelay") {
+        const v = numeric($("prmResumeDelay").value, "resume delay");
+        data = iface.lockdown.encodeFunctionData("setResumeDelay", [v]);
+        m = method("setResumeDelay", [{ name: "newDelay", type: "uint64", internalType: "uint64" }]); vals = { newDelay: v.toString() };
+        decoded = { action: "setResumeDelay", singleton, newDelay: v.toString() };
+      } else {
+        const owner = requireAddress($("prmRecoveryOwner").value, "recovery owner");
+        const fn = boolValue("prmRecoveryAllowed") ? "addRecoveryOwner" : "removeRecoveryOwner";
+        data = iface.lockdown.encodeFunctionData(fn, [owner]);
+        m = method(fn, [{ name: "owner", type: "address", internalType: "address" }]); vals = { owner };
+        decoded = { action: fn, singleton, owner };
+      }
+      setLast(txBuilder([builderTx(singleton, 0, data, m, vals)], decoded.action), { ...decoded, note: "Owner-path self-call. Schedule + wait if timelockDelay > 0; forbidden while a lockdown is active." });
+      log("paramsOut", decoded);
+    }
+
+    // ============================ 7 TRIGGER ============================
+    function reasonHashFrom(textId, hashId) {
+      const explicit = $(hashId).value.trim();
+      if (explicit) return bytes32(explicit, "reasonHash");
+      return ethers.keccak256(ethers.toUtf8Bytes($(textId).value || ""));
+    }
+    function computeDomainSeparator(singleton) {
+      return ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+        ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+        [DOMAIN_TYPEHASH, ethers.keccak256(ethers.toUtf8Bytes("RuntimeLockdown")), ethers.keccak256(ethers.toUtf8Bytes(SINGLETON_VERSION)), BigInt($("chainId").value), singleton]
+      ));
+    }
+    function lockdownDigest(domainSep, safe, reasonHash) {
+      const structHash = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "address", "bytes32"], [LOCKDOWN_TYPEHASH, safe, reasonHash]));
+      return ethers.keccak256(ethers.concat(["0x1901", domainSep, structHash]));
+    }
+    async function buildDigest() {
+      const p = getReadProvider();
+      const type = keyTypeOf("trig");
+      const safe = requireAddress($("trigSafe").value, "Safe");
+      const singleton = requireAddress($("trigSingleton").value, "singleton");
+      const identity = deriveIdentity("trig", "panic identity");
+      const verifier = type === "ecdsa" ? null : requireAddress($("trigVerifier").value, "verifier");
+      const reasonHash = reasonHashFrom("trigReasonText", "trigReasonHash");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const registered = await safeCall(ld, "isLockdownSigner", [safe, identity], false);
+      if (!registered) throw new Error("This bytes identity is not a registered signer on this Safe. Register it (step 5) first.");
+      const localDomain = computeDomainSeparator(singleton);
+      // The singleton exposes the EIP-712 domain via ERC-5267 eip712Domain(),
+      // not a DOMAIN_SEPARATOR() getter. Cross-check the domain inputs the UI
+      // used to build localDomain against the on-chain values.
+      const dom = await safeCall(ld, "eip712Domain", [], null);
+      if (!dom) throw new Error("Cannot read singleton eip712Domain(); refusing to build a signable digest.");
+      const mismatches = [];
+      if (dom.name !== "RuntimeLockdown") mismatches.push(`name ${dom.name} != RuntimeLockdown`);
+      if (dom.version !== SINGLETON_VERSION) mismatches.push(`version ${dom.version} != ${SINGLETON_VERSION}`);
+      if (BigInt(dom.chainId) !== BigInt($("chainId").value)) mismatches.push(`chainId ${dom.chainId} != ${$("chainId").value}`);
+      if (dom.verifyingContract.toLowerCase() !== singleton.toLowerCase()) mismatches.push(`verifyingContract ${dom.verifyingContract} != ${singleton}`);
+      if (mismatches.length) throw new Error(`EIP-712 domain mismatch: ${mismatches.join("; ")}. Wrong chainId/singleton/version - do not sign.`);
+      const digest = lockdownDigest(localDomain, safe, reasonHash);
+      triggerCtx = { type, safe, singleton, verifier, identity, reasonHash, digest, chainId: String(dom.chainId), signature: null };
+      $("submitTrigger").disabled = true;
+      const out = { step: "digest-built", scheme: type, safe, verifier, identity, reasonHash, domainSeparator: localDomain, domainOnChainOk: true, digestToSign: digest };
+      if (type === "password") {
+        // PasswordVerifier ignores the digest; the cleartext password IS the signature.
+        const pwd = $("trigSecret").value;
+        if (!pwd) throw new Error("Enter the panic password.");
+        triggerCtx.signature = ethers.hexlify(ethers.toUtf8Bytes(pwd));
+        $("submitTrigger").disabled = false;
+        out.next = "Password staged as signature. Submit is enabled WITHOUT drill. Do not run testSigner on a production password unless you intentionally accept the RPC leak.";
+        out.warning = "PasswordVerifier: cleartext is broadcast at submit and leaks over RPC if drilled. Single-use, frontrunnable.";
+      } else if (type === "webauthn") {
+        out.next = "Sign with passkey (WebAuthn): the digest above is the challenge. Then drill.";
+      } else {
+        out.next = "Sign the digest (burner key / wallet / paste). Then drill.";
+      }
+      log("triggerOut", out);
+    }
+    function requireDigest() { if (!triggerCtx || !triggerCtx.digest) throw new Error("Build the EIP-712 digest first."); return triggerCtx; }
+    function normalizeSignature(raw) {
+      const sig = ethers.Signature.from(raw); // enforces canonical low-s, v in 27/28
+      const recovered = ethers.recoverAddress(triggerCtx.digest, sig);
+      return { serialized: sig.serialized, recovered };
+    }
+    function requireEcdsa(ctx) { if (ctx.type !== "ecdsa") throw new Error(`This signing method is ECDSA-only; current scheme is ${ctx.type}.`); }
+    function setSignature(serialized, recovered, source) {
+      const ctx = requireDigest();
+      ctx.signature = serialized;
+      const matchesKey = recovered.toLowerCase() === ethers.getAddress(ctx.identity).toLowerCase();
+      $("submitTrigger").disabled = true; // re-enabled only by a successful drill
+      log("triggerOut", { step: "signed", source, signature: serialized, recovered, matchesPanicKey: matchesKey, warning: matchesKey ? undefined : "Recovered address does not match the panic key - the signature will fail verification.", next: "Run the drill (testSigner)." });
+    }
+    function setRawSignature(sig, source, extra) {
+      const ctx = requireDigest();
+      ctx.signature = sig;
+      $("submitTrigger").disabled = true;
+      log("triggerOut", { step: "signed", source, signature: sig, ...(extra || {}), next: "Run the drill (testSigner)." });
+    }
+    function signWithKey() {
+      const ctx = requireDigest();
+      requireEcdsa(ctx);
+      const pk = $("trigPrivKey").value.trim();
+      if (!pk) throw new Error("Enter a burner private key, or use wallet/paste.");
+      const sk = new ethers.SigningKey(pk.startsWith("0x") ? pk : `0x${pk}`);
+      const sig = sk.sign(ctx.digest);
+      setSignature(sig.serialized, ethers.recoverAddress(ctx.digest, sig), "burner-key");
+    }
+    async function signWithWallet() {
+      const ctx = requireDigest();
+      requireEcdsa(ctx);
+      if (!signer) await connect();
+      const account = await signer.getAddress();
+      const walletNetwork = await provider.getNetwork();
+      if (walletNetwork.chainId !== BigInt($("chainId").value)) {
+        throw new Error(`Connected wallet is on chainId ${walletNetwork.chainId}; digest domain uses chainId ${$("chainId").value}. Switch networks before signing.`);
+      }
+      // EIP-712 typed-data signing (eth_signTypedData_v4). Reproduces ctx.digest
+      // exactly (== contract _hashTypedDataV4) and is clear-signed by the wallet.
+      // Raw eth_sign is rejected by modern wallets (MetaMask et al.), so it is
+      // avoided here; the burner-key path covers raw-digest signing.
+      const domain = {
+        name: "RuntimeLockdown",
+        version: SINGLETON_VERSION,
+        chainId: BigInt($("chainId").value),
+        verifyingContract: ctx.singleton
+      };
+      const types = { Lockdown: [{ name: "safe", type: "address" }, { name: "reasonHash", type: "bytes32" }] };
+      const raw = await signer.signTypedData(domain, types, { safe: ctx.safe, reasonHash: ctx.reasonHash });
+      const n = normalizeSignature(raw);
+      if (n.recovered.toLowerCase() !== account.toLowerCase()) {
+        throw new Error(`Signed address ${n.recovered} != connected wallet ${account}. Wrong account or domain.`);
+      }
+      setSignature(n.serialized, n.recovered, `wallet signTypedData (${account})`);
+    }
+    async function signWithPasskey() {
+      const ctx = requireDigest();
+      if (ctx.type !== "webauthn") throw new Error(`Passkey signing is WebAuthn-only; current scheme is ${ctx.type}.`);
+      const sig = await webauthnAssertion(ctx.digest);
+      setRawSignature(sig, "webauthn passkey", { note: "Assertion assembled with the digest as challenge. Passkey signatures are non-secret." });
+    }
+    function usePastedSig() {
+      const ctx = requireDigest();
+      const raw = $("trigSigPaste").value.trim();
+      if (ctx.type === "ecdsa") {
+        if (!/^0x[0-9a-fA-F]{130}$/.test(raw)) throw new Error("ECDSA: paste a 65-byte (132-char) 0x signature r||s||v.");
+        const n = normalizeSignature(raw);
+        setSignature(n.serialized, n.recovered, "pasted");
+      } else {
+        if (!/^0x([0-9a-fA-F]{2})*$/.test(raw) || raw.length < 4) throw new Error("Paste a 0x-hex signature (flat-encoded WebAuthn assertion, or password bytes).");
+        setRawSignature(raw, `pasted (${ctx.type})`);
+      }
+    }
+    async function drillVerify() {
+      const ctx = requireDigest();
+      if (!ctx.signature) throw new Error("Produce a signature first.");
+      if (ctx.type === "password" && !$("allowPasswordDrill").checked) {
+        throw new Error("Password drill disabled: testSigner would leak the cleartext over RPC. Tick the explicit checkbox only for throwaway passwords.");
+      }
+      const ld = new ethers.Contract(ctx.singleton, ABI.lockdown, getReadProvider());
+      const ok = await ld.testSigner(ctx.identity, ctx.digest, ctx.signature);
+      $("submitTrigger").disabled = !ok;
+      log("triggerOut", { step: "drill", ok, verdict: ok ? "PASS - signature verifies WITHOUT burning. Submit is enabled." : "FAIL - signature does not verify. Re-sign or check the identity/digest.", scheme: ctx.type, identity: ctx.identity, warning: ctx.type === "password" ? "Password drill leaked the cleartext over RPC. Treat this password as compromised after a drill; rotate before real use." : undefined });
+    }
+    function triggerCalldata(ctx) {
+      return iface.lockdown.encodeFunctionData("triggerLockdown", [ctx.safe, ctx.reasonHash, ctx.identity, ctx.signature]);
+    }
+    async function submitTrigger() {
+      const ctx = requireDigest();
+      if (!ctx.signature) throw new Error("Produce a signature and pass the drill first.");
+      if (!signer) await connect();
+      const walletNetwork = await signer.provider.getNetwork();
+      if (String(walletNetwork.chainId) !== ctx.chainId || String($("chainId").value).trim() !== ctx.chainId) {
+        throw new Error(`Wallet/selected chain changed since digest creation (expected ${ctx.chainId}, wallet ${walletNetwork.chainId}). Rebuild the digest before submitting.`);
+      }
+      const readNetwork = await getReadProvider().getNetwork();
+      if (String(readNetwork.chainId) !== ctx.chainId) throw new Error(`Read RPC changed since digest creation (expected chain ${ctx.chainId}, RPC ${readNetwork.chainId}). Rebuild the digest before submitting.`);
+      if (requireAddress($("trigSafe").value, "Safe").toLowerCase() !== ctx.safe.toLowerCase() || requireAddress($("trigSingleton").value, "singleton").toLowerCase() !== ctx.singleton.toLowerCase()) {
+        throw new Error("Safe or singleton changed since digest creation. Rebuild the digest before submitting.");
+      }
+      if (deriveIdentity("trig", "panic identity").toLowerCase() !== ctx.identity.toLowerCase() || reasonHashFrom("trigReasonText", "trigReasonHash").toLowerCase() !== ctx.reasonHash.toLowerCase()) {
+        throw new Error("Signer material or reason changed since digest creation. Rebuild the digest before submitting.");
+      }
+      const ld = new ethers.Contract(ctx.singleton, ABI.lockdown, signer);
+      let broadcastAttempted = false;
+      $("submitTrigger").disabled = true;
+      try {
+        broadcastAttempted = true;
+        log("triggerOut", { step: "submitting", state: "UNCONFIRMED", safe: ctx.safe, warning: ctx.type === "password" ? "The one-time password is being disclosed to the wallet/RPC. Do not reuse it if this attempt fails." : undefined });
+        let tx = await ld.triggerLockdown(ctx.safe, ctx.reasonHash, ctx.identity, ctx.signature);
+        log("triggerOut", { step: "submitted", state: "UNCONFIRMED", txHash: tx.hash, note: "Broadcast accepted. Waiting for one confirmation and on-chain state verification." });
+        let receipt;
+        try {
+          receipt = await tx.wait(1);
+        } catch (err) {
+          if (err && err.code === "TRANSACTION_REPLACED" && !err.cancelled && err.receipt && Number(err.receipt.status) === 1) {
+            tx = err.replacement || tx;
+            receipt = err.receipt;
+          } else {
+            throw err;
+          }
+        }
+        if (!receipt || Number(receipt.status) !== 1) throw new Error("Trigger transaction was not successfully confirmed");
+        // Verify against the provider that returned the receipt. A separate
+        // read RPC may lag and falsely report the pre-lockdown state.
+        const readLd = new ethers.Contract(ctx.singleton, ABI.lockdown, signer.provider);
+        const [stateId] = await readLd.getState(ctx.safe);
+        const burnt = await readLd.isSignerBurntPermanently(ctx.safe, ctx.identity);
+        if (Number(stateId) !== 2 || !burnt) throw new Error(`Receipt succeeded but post-conditions failed (state=${stateName(stateId)}, signerBurnt=${burnt})`);
+        log("triggerOut", { step: "confirmed", state: "LockedDown", txHash: tx.hash, blockNumber: String(receipt.blockNumber), confirmations: 1, verificationProvider: "connected wallet provider", signerBurntPermanently: true, note: "Confirmed on-chain: the Safe is LockedDown and this signer identity is permanently burnt." });
+      } catch (err) {
+        const passwordWarning = ctx.type === "password" && broadcastAttempted
+          ? "The password may have reached the wallet or RPC while the signer can still be live. Treat it as compromised and rotate it before relying on it again."
+          : undefined;
+        log("triggerOut", { step: "failed", state: "NOT CONFIRMED", error: err && err.message ? err.message : String(err), passwordWarning });
+        throw err;
+      }
+    }
+    function buildTriggerJson() {
+      const ctx = requireDigest();
+      if (!ctx.signature) throw new Error("Produce a signature first.");
+      const data = triggerCalldata(ctx);
+      setLast({ type: "direct-call", chainId: ctx.chainId, to: ctx.singleton, value: "0", data, function: "triggerLockdown(address,bytes32,bytes,bytes)", args: { safe: ctx.safe, reasonHash: ctx.reasonHash, signer: ctx.identity, signature: ctx.signature }, from: "Any EOA or relayer on the selected chain; NEVER the Safe itself" }, { action: "triggerLockdown", singleton: ctx.singleton, safe: ctx.safe, verifier: ctx.verifier, identity: ctx.identity, reasonHash: ctx.reasonHash, warning: "Permissionless direct call only. Do NOT import this into Safe{Wallet}: owner-path execution may be timelocked and defeat the panic fast path." });
+    }
+
+    // ============================ 8 STATE ============================
+    async function readState() {
+      const p = getReadProvider();
+      const safe = requireAddress($("stateSafe").value, "Safe");
+      const singleton = requireAddress($("stateSingleton").value, "singleton");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const [stateId, secondsRemaining] = await ld.getState(safe);
+      const snap = await ld.getConfigSnapshot(safe);
+      const delay = await ld.getTimelockDelay(safe);
+      const reason = await ld.lastReasonHash(safe);
+      const recoveryOwners = await ld.getRecoveryOwners(safe);
+      const lockdownSigners = await ld.getLockdownSigners(safe);
+      const until = snap[2];
+      const resumeAt = until + snap[1];
+      const now = Math.floor(Date.now() / 1000);
+      log("stateOut", {
+        safe, singleton,
+        state: stateName(stateId),
+        secondsRemaining: secondsRemaining.toString(),
+        lockdownDuration: snap[0].toString(), resumeDelay: snap[1].toString(), lockdownUntil: until.toString(),
+        lockdownUntilIso: until === 0n ? null : unixIso(until),
+        resumeEligibleAt: resumeAt.toString(), resumeEligibleAtIso: until === 0n ? null : unixIso(resumeAt),
+        resumeCountdownSeconds: Math.max(0, Number(resumeAt) - now),
+        signersCount: Number(snap[3]), recoveryOwnerAllowlistCount: snap[4].toString(),
+        recoveryOwners,
+        lockdownSigners: lockdownSigners.map((identity) => ({ identity, lengthBytes: (identity.length - 2) / 2 })),
+        timelockDelay: delay.toString(), coercionResistant: delay > 0n,
+        effectiveCoercionWindowSeconds: delay > 0n ? Math.min(Number(delay), Number(snap[0] + snap[1])).toString() : "0 (no timelock)",
+        lastReasonHash: reason,
+      });
+    }
+
+    // ============================ 9 RECOVERY ============================
+    function findOwnerIndex(owners, owner) { const t = ethers.getAddress(owner); return owners.findIndex((x) => ethers.getAddress(x) === t); }
+    function prevOwnerFor(owners, oldOwner) {
+      const idx = findOwnerIndex(owners, oldOwner);
+      if (idx < 0) throw new Error("oldOwner is not a current Safe owner");
+      return idx === 0 ? "0x0000000000000000000000000000000000000001" : ethers.getAddress(owners[idx - 1]);
+    }
+    async function readRecoveryCtx() {
+      const p = getReadProvider();
+      const safe = requireAddress($("recSafe").value, "Safe");
+      const singleton = requireAddress($("recSingleton").value, "singleton");
+      const safeC = new ethers.Contract(safe, ABI.safe, p);
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const owners = (await safeC.getOwners()).map((x) => ethers.getAddress(x));
+      const threshold = await safeC.getThreshold();
+      const nonce = await safeC.nonce();
+      const [stateId] = await ld.getState(safe);
+      const snap = await ld.getConfigSnapshot(safe);
+      const block = await p.getBlock("latest");
+      return { safe, singleton, owners, threshold, nonce, ld, state: stateName(stateId), lockdownUntil: snap[2], resumeDelay: snap[1], resumeEligibleAt: snap[2] + snap[1], blockTimestamp: BigInt(block.timestamp) };
+    }
+    function compromisedSet(ctx, primary) {
+      const set = new Set();
+      if (primary) set.add(ethers.getAddress(primary));
+      for (const o of linesToAddresses($("recOtherCompromised").value, "other compromised owner")) {
+        if (findOwnerIndex(ctx.owners, o) < 0) throw new Error(`${o} is listed compromised but is not a current owner`);
+        set.add(ethers.getAddress(o));
+      }
+      return set;
+    }
+    async function validateRecovery() {
+      const ctx = await readRecoveryCtx();
+      const report = { safe: ctx.safe, state: ctx.state, blockTimestamp: ctx.blockTimestamp.toString(), nonce: ctx.nonce.toString(), threshold: ctx.threshold.toString(), owners: ctx.owners, resumeEligibleAt: ctx.resumeEligibleAt.toString(), resumeEligibleAtIso: ctx.lockdownUntil === 0n ? null : unixIso(ctx.resumeEligibleAt) };
+      const oldRaw = $("recOldOwner").value.trim(), newRaw = $("recNewOwner").value.trim();
+      if (oldRaw || newRaw) {
+        const oldOwner = requireAddress(oldRaw, "oldOwner"), newOwner = requireAddress(newRaw, "newOwner");
+        const prev = prevOwnerFor(ctx.owners, oldOwner);
+        const allowlisted = await ctx.ld.isRecoveryOwner(ctx.safe, newOwner);
+        const comp = compromisedSet(ctx, oldOwner);
+        report.swapOwner = { prevOwner: prev, oldOwner, newOwner, newOwnerAllowlisted: allowlisted, uncompromisedOwners: ctx.owners.length - comp.size, thresholdStillReachable: BigInt(ctx.owners.length - comp.size) >= ctx.threshold };
+        $("recPrevOwner").value = prev;
+      }
+      const remRaw = (keyTypeOf("rec") === "password" ? $("recSecret").value : $("recMat").value).trim();
+      if (remRaw) {
+        const identity = deriveIdentity("rec", "signer to remove");
+        report.removeSigner = { scheme: keyTypeOf("rec"), identity, isLockdownSigner: await ctx.ld.isLockdownSigner(ctx.safe, identity) };
+      }
+      log("recoveryOut", report);
+      return report;
+    }
+    async function recNonceBurn() {
+      const ctx = await readRecoveryCtx();
+      if (ctx.state !== "Recovering") throw new Error(`Nonce burns are only valid during Recovering; current state is ${ctx.state}`);
+      setLast(txBuilder([builderTx(ctx.safe, 0, "0x", { name: "nonce burn (empty self-call)", payable: false, inputs: [] }, {})], "Recovery nonce burn"), { action: "nonce-burn", to: ctx.safe, currentNonce: ctx.nonce.toString(), refundFields: "must be zero in Safe execution" });
+    }
+    async function recSwapOwner() {
+      const ctx = await readRecoveryCtx();
+      const oldOwner = requireAddress($("recOldOwner").value, "oldOwner"), newOwner = requireAddress($("recNewOwner").value, "newOwner");
+      const calc = prevOwnerFor(ctx.owners, oldOwner);
+      const provided = optionalAddress($("recPrevOwner").value, "prevOwner");
+      const prev = provided || calc;
+      if (prev !== calc) throw new Error(`prevOwner mismatch: expected ${calc}, got ${prev}`);
+      if (findOwnerIndex(ctx.owners, newOwner) >= 0) throw new Error("newOwner is already a Safe owner; use a distinct cold backup");
+      if (!await ctx.ld.isRecoveryOwner(ctx.safe, newOwner)) throw new Error("newOwner is not in the recovery owner allowlist");
+      const comp = compromisedSet(ctx, oldOwner);
+      if (BigInt(ctx.owners.length - comp.size) < ctx.threshold) throw new Error(`Threshold unreachable if all listed compromised owners are unavailable: threshold=${ctx.threshold}, uncompromised=${ctx.owners.length - comp.size}`);
+      $("recPrevOwner").value = prev;
+      const data = iface.safe.encodeFunctionData("swapOwner", [prev, oldOwner, newOwner]);
+      setLast(txBuilder([builderTx(ctx.safe, 0, data, method("swapOwner", [{ name: "prevOwner", type: "address", internalType: "address" }, { name: "oldOwner", type: "address", internalType: "address" }, { name: "newOwner", type: "address", internalType: "address" }]), { prevOwner: prev, oldOwner, newOwner })], "Recovery swapOwner"), { action: "swapOwner", safe: ctx.safe, prevOwner: prev, oldOwner, newOwner, refundFields: "must be zero" });
+    }
+    async function recDisableModule() {
+      const ctx = await readRecoveryCtx();
+      if (ctx.state !== "Recovering") throw new Error(`Module disable is only valid during Recovering; current state is ${ctx.state}`);
+      const prevModule = requireAddress($("recPrevModule").value, "prevModule");
+      const module = requireAddress($("recModule").value, "module");
+      if (module === "0x0000000000000000000000000000000000000001") throw new Error("module cannot be the Safe module sentinel");
+      if (prevModule === module) throw new Error("prevModule and module must be distinct");
+      const data = iface.safe.encodeFunctionData("disableModule", [prevModule, module]);
+      setLast(txBuilder([builderTx(ctx.safe, 0, data, method("disableModule", [{ name: "prevModule", type: "address", internalType: "address" }, { name: "module", type: "address", internalType: "address" }]), { prevModule, module })], "Recovery disableModule"), { action: "disableModule", safe: ctx.safe, prevModule, module, refundFields: "must be zero" });
+    }
+    async function recRemoveSignerBuild() {
+      const ctx = await readRecoveryCtx();
+      const identity = deriveIdentity("rec", "signer to remove");
+      if (!await ctx.ld.isLockdownSigner(ctx.safe, identity)) throw new Error("That identity is not a currently registered signer");
+      const data = iface.lockdown.encodeFunctionData("removeLockdownSigner", [identity]);
+      setLast(txBuilder([builderTx(ctx.singleton, 0, data, method("removeLockdownSigner", [{ name: "signer", type: "bytes", internalType: "bytes" }]), { signer: identity })], "Recovery removeLockdownSigner"), { action: "removeLockdownSigner", singleton: ctx.singleton, scheme: keyTypeOf("rec"), signer: identity, note: "Cull a surviving compromised panic signer before automatic return to Normal.", refundFields: "must be zero" });
+    }
+    async function checkAutoResume() {
+      const ctx = await readRecoveryCtx();
+      if (ctx.lockdownUntil === 0n) {
+        log("recoveryOut", {
+          safe: ctx.safe,
+          state: ctx.state,
+          blockTimestamp: ctx.blockTimestamp.toString(),
+          resumeEligibleAt: null,
+          automaticallyResumed: ctx.state === "Normal" ? "possible; historical incident timestamps are normalized to zero by public views" : false,
+          transactionRequired: false,
+          note: ctx.state === "Normal"
+            ? "getState reports Normal. No resume transaction exists; getConfigSnapshot intentionally hides an elapsed incident timestamp."
+            : "No active or completed incident timestamp is exposed for this Safe."
+        });
+        return;
+      }
+      const eligible = ctx.blockTimestamp >= ctx.resumeEligibleAt;
+      log("recoveryOut", {
+        safe: ctx.safe,
+        state: ctx.state,
+        blockTimestamp: ctx.blockTimestamp.toString(),
+        resumeEligibleAt: ctx.resumeEligibleAt.toString(),
+        resumeEligibleAtIso: unixIso(ctx.resumeEligibleAt),
+        secondsUntilAutoResume: eligible ? "0" : (ctx.resumeEligibleAt - ctx.blockTimestamp).toString(),
+        automaticallyResumed: eligible && ctx.state === "Normal",
+        transactionRequired: false,
+        note: eligible && ctx.state !== "Normal"
+          ? "The auto-resume boundary has passed but getState is not Normal; stop and investigate the deployment/version."
+          : "No resume transaction exists. Finish recovery operations before the boundary."
+      });
+    }
+
+    // ============================ 10 JANITOR ============================
+    function buildSweepOwner() {
+      const singleton = requireAddress($("janSingleton").value, "singleton");
+      const safe = requireAddress($("janSafe").value, "Safe");
+      const hash = bytes32($("janOwnerHash").value, "safeTxHash");
+      const data = iface.lockdown.encodeFunctionData("sweepExpiredOwnerTicket", [safe, hash]);
+      setLast(txBuilder([builderTx(singleton, 0, data, method("sweepExpiredOwnerTicket", [{ name: "safe", type: "address", internalType: "address" }, { name: "safeTxHash", type: "bytes32", internalType: "bytes32" }]), { safe, safeTxHash: hash })], "sweepExpiredOwnerTicket"), { action: "sweepExpiredOwnerTicket", singleton, safe, safeTxHash: hash, note: "Permissionless; reverts unless the entry is past its 90-day TTL." });
+    }
+    async function buildSweepModule() {
+      const singleton = requireAddress($("janSingleton").value, "singleton");
+      const safe = requireAddress($("janSafe").value, "Safe");
+      const module = requireAddress($("janModModule").value, "module");
+      const to = requireAddress($("janModTo").value, "to");
+      const value = numeric($("janModValue").value, "value");
+      const data = hexData($("janModData").value, "data");
+      const m = { module, to, value, data, operation: 0 };
+      const moduleTxHash = await computeModuleTxHash(singleton, safe, m);
+      const cd = iface.lockdown.encodeFunctionData("sweepExpiredModuleTicket", [safe, moduleTxHash]);
+      setLast(txBuilder([builderTx(singleton, 0, cd, method("sweepExpiredModuleTicket", [{ name: "safe", type: "address", internalType: "address" }, { name: "moduleTxHash", type: "bytes32", internalType: "bytes32" }]), { safe, moduleTxHash })], "sweepExpiredModuleTicket"), { action: "sweepExpiredModuleTicket", singleton, safe, moduleTxHash, module, to, value: value.toString(), note: "Permissionless; past-TTL only." });
+    }
+    async function checkBurntKey() {
+      const p = getReadProvider();
+      const safe = requireAddress($("janSafe").value, "Safe");
+      const singleton = requireAddress($("janSingleton").value, "singleton");
+      const identity = deriveIdentity("jan", "panic identity");
+      const ld = new ethers.Contract(singleton, ABI.lockdown, p);
+      const burnt = await ld.isSignerBurntPermanently(safe, identity);
+      log("janitorOut", { safe, scheme: keyTypeOf("jan"), identity, isSignerBurntPermanently: burnt, note: burnt ? "Re-adding this identity reverts LockdownSigners_BurntPermanently - use fresh material." : "Not burnt; this identity can be (re)registered." });
+    }
+
+    // ---------- builder export ----------
+    async function copyJson() { if (!lastBuilder) throw new Error("No transaction generated"); await navigator.clipboard.writeText(JSON.stringify(lastBuilder, null, 2)); $("previewOut").textContent += "\n\nCopied JSON to clipboard."; }
+    function downloadJson() {
+      if (!lastBuilder) throw new Error("No transaction generated");
+      const blob = new Blob([JSON.stringify(lastBuilder, null, 2) + "\n"], { type: "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "safe-lockdown-v1.0.0-transaction.json"; a.click(); URL.revokeObjectURL(a.href);
+    }
+
+    // ---------- wiring ----------
+    function bind(id, fn) { $(id).addEventListener("click", async () => { try { await fn(); } catch (err) { alert(err.message || String(err)); } }); }
+    function goTo(id) { window.location.hash = id; $(id).scrollIntoView({ behavior: "smooth", block: "start" }); }
+
+    $("networkPreset").addEventListener("change", applyNetworkPreset);
+    $("deployWebAuthnRequireUV").addEventListener("change", () => {
+      if (!loadedManifest) return;
+      $("expWebAuthnVerifierCodehash").value = "";
+      applyManifest(loadedManifest, loadedManifestSource);
+    });
+    $("manifestFile").addEventListener("change", async (e) => { try { if (e.target.files[0]) applyManifest(JSON.parse(await e.target.files[0].text()), e.target.files[0].name); } catch (err) { alert(err.message || String(err)); } });
+    $("rollbackSnapshotFile").addEventListener("change", async (e) => { try { if (e.target.files[0]) acceptRollbackSnapshot(JSON.parse(await e.target.files[0].text()), e.target.files[0].name); } catch (err) { alert(err.message || String(err)); } });
+    bind("loadManifest", loadDefaultManifest);
+    bind("connect", connect);
+    bind("switchNetwork", switchNetwork);
+    bind("diagnoseSafe", diagnoseSafe);
+    bind("diagGoInit", () => { const r = lastDiagnostic; if (r) $("initSafe").value = r.safe; goTo("init"); });
+    bind("diagGoInstall", () => goTo("install"));
+    bind("loadArtifacts", loadArtifacts);
+    bind("deployPasswordVerifier", deployPasswordVerifier);
+    bind("deployWebAuthnVerifier", deployWebAuthnVerifier);
+    bind("deploySingleton", deploySingleton);
+    bind("readCodehashes", readCodehashes);
+    bind("buildInitialize", buildInitialize);
+    bind("captureRollbackSnapshot", captureRollbackSnapshot);
+    bind("downloadRollbackSnapshot", downloadRollbackSnapshot);
+    bind("buildInstall", buildInstall);
+    bind("buildRemove", buildRemoveGuards);
+    bind("buildRestoreFallback", buildRestoreFallback);
+    bind("buildRestoreGuards", buildRestoreGuards);
+    bind("refreshSignerStatus", refreshSignerStatus);
+    bind("sigCreatePasskey", async () => { const pk = await webauthnCreatePubkey(); $("sigMat").value = pk; $("sigType").value = "webauthn"; log("signerOut", { action: "create-passkey", pubkey: pk, note: "Filled material with the new passkey P-256 public key (qx||qy). Approve a WebAuthnVerifier, then add this as a signer." }); });
+    bind("buildAddSigner", buildAddSigner);
+    bind("buildRemoveSigner", buildRemoveSigner);
+    bind("buildRotateSigner", buildRotateSigner);
+    bind("listSigners", listSigners);
+    bind("buildSetTimelock", buildSetTimelock);
+    bind("buildSetBypasser", buildSetBypasser);
+    bind("computeSafeTxHash", computeSafeTxHash);
+    bind("buildScheduleOwner", buildScheduleOwner);
+    bind("buildCancelOwner", buildCancelOwner);
+    bind("buildScheduleModule", buildScheduleModule);
+    bind("buildCancelModule", buildCancelModule);
+    bind("buildBypassTimelock", buildBypassTimelock);
+    bind("readTimelockState", readTimelockState);
+    bind("buildSetDuration", () => buildParam("duration"));
+    bind("buildSetResumeDelay", () => buildParam("resumeDelay"));
+    bind("buildSetRecoveryOwner", () => buildParam("recoveryOwner"));
+    bind("buildDigest", buildDigest);
+    bind("signWithKey", signWithKey);
+    bind("signWithWallet", signWithWallet);
+    bind("signWithPasskey", signWithPasskey);
+    bind("usepastedSig", usePastedSig);
+    bind("drillVerify", drillVerify);
+    bind("submitTrigger", submitTrigger);
+    bind("buildTriggerJson", buildTriggerJson);
+    bind("readState", readState);
+    bind("validateRecovery", validateRecovery);
+    bind("recNonceBurn", recNonceBurn);
+    bind("recSwapOwner", recSwapOwner);
+    bind("recDisableModule", recDisableModule);
+    bind("recRemoveSignerBtn", recRemoveSignerBuild);
+    bind("checkAutoResume", checkAutoResume);
+    bind("buildSweepOwner", buildSweepOwner);
+    bind("buildSweepModule", buildSweepModule);
+    bind("checkBurntKey", checkBurntKey);
+    bind("copyJson", copyJson);
+    bind("downloadJson", downloadJson);
+  </script>
+</body>
+</html>

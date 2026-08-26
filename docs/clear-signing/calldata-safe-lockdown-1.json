@@ -1,0 +1,161 @@
+{
+  "$schema": "https://eips.ethereum.org/assets/eip-7730/erc7730-v2.schema.json",
+  "$comment": "Pre-deployment ERC-7730 v2 template. Empty deployments deliberately match no transaction. Add every verified v1.0.0 singleton deployment only after the frozen runtime is deployed and Sourcify-verified.",
+  "context": {
+    "$id": "runtime-lockdown-v1-calldata",
+    "contract": {
+      "deployments": []
+    }
+  },
+  "metadata": {
+    "owner": "Runtime Capital",
+    "contractName": "LockdownTimelock",
+    "info": {
+      "url": "https://runtime.capital"
+    },
+    "enums": {
+      "operation": {
+        "0": "CALL",
+        "1": "DELEGATECALL"
+      }
+    }
+  },
+  "display": {
+    "formats": {
+      "initialize(uint64 lockdownDuration,uint64 resumeDelay,address[] initialRecoveryOwners,bytes[] initialSigners)": {
+        "intent": "Initialize Safe Lockdown",
+        "fields": [
+          { "path": "#.lockdownDuration", "label": "Lockdown duration", "format": "duration" },
+          { "path": "#.resumeDelay", "label": "Recovery delay", "format": "duration" },
+          { "path": "#.initialRecoveryOwners", "label": "Recovery owners", "format": "raw" },
+          { "path": "#.initialSigners", "label": "Panic signers", "format": "raw" }
+        ]
+      },
+      "addLockdownSigner(bytes signer)": {
+        "intent": "Add a panic signer",
+        "fields": [
+          { "path": "#.signer", "label": "Signer identity", "format": "raw" }
+        ]
+      },
+      "removeLockdownSigner(bytes signer)": {
+        "intent": "Remove and burn panic signer",
+        "fields": [
+          { "path": "#.signer", "label": "Signer identity", "format": "raw" }
+        ]
+      },
+      "rotateLockdownSigner(bytes oldSigner,bytes newSigner)": {
+        "intent": "Rotate a panic signer",
+        "fields": [
+          { "path": "#.oldSigner", "label": "Old signer", "format": "raw" },
+          { "path": "#.newSigner", "label": "New signer identity", "format": "raw" }
+        ]
+      },
+      "setLockdownDuration(uint64 newDuration)": {
+        "intent": "Change lockdown duration",
+        "fields": [
+          { "path": "#.newDuration", "label": "Lockdown duration", "format": "duration" }
+        ]
+      },
+      "setResumeDelay(uint64 newDelay)": {
+        "intent": "Change recovery delay",
+        "fields": [
+          { "path": "#.newDelay", "label": "New recovery delay", "format": "duration" }
+        ]
+      },
+      "addRecoveryOwner(address owner)": {
+        "intent": "Allow a recovery owner",
+        "fields": [
+          { "path": "#.owner", "label": "Recovery owner", "format": "addressName", "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] } }
+        ]
+      },
+      "removeRecoveryOwner(address owner)": {
+        "intent": "Remove a recovery owner",
+        "fields": [
+          { "path": "#.owner", "label": "Recovery owner", "format": "addressName", "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] } }
+        ]
+      },
+      "setTimelockDelay(uint64 newDelay)": {
+        "intent": "Change Safe execution timelock",
+        "fields": [
+          { "path": "#.newDelay", "label": "New timelock delay", "format": "duration" }
+        ]
+      },
+      "setTimelockBypasser(address bypasser,bool allowed)": {
+        "intent": "Change a timelock bypasser",
+        "fields": [
+          { "path": "#.bypasser", "label": "Bypass authority", "format": "addressName", "params": { "types": ["eoa", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.allowed", "label": "Allowed", "format": "raw" }
+        ]
+      },
+      "scheduleTransaction(address safe,uint256 nonce,(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver) params,bytes signatures)": {
+        "intent": "Schedule Safe transaction",
+        "fields": [
+          { "path": "#.safe", "label": "Safe", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.nonce", "label": "Safe nonce", "format": "raw" },
+          { "path": "#.params.to", "label": "Target", "format": "addressName", "params": { "types": ["eoa", "contract", "token"], "sources": ["local", "ens"] } },
+          { "path": "#.params.value", "label": "Native value", "format": "amount" },
+          { "path": "#.params.data", "label": "Nested call", "format": "calldata", "params": { "calleePath": "#.params.to", "amountPath": "#.params.value" } },
+          { "path": "#.params.operation", "label": "Operation", "format": "enum", "params": { "$ref": "$.metadata.enums.operation" } },
+          { "path": "#.params.safeTxGas", "label": "Safe transaction gas", "format": "raw" },
+          { "path": "#.params.baseGas", "label": "Base gas", "format": "raw" },
+          { "path": "#.params.gasPrice", "label": "Gas price", "format": "raw" },
+          { "path": "#.params.gasToken", "label": "Gas token", "format": "addressName", "params": { "types": ["contract", "token"], "sources": ["local"] } },
+          { "path": "#.params.refundReceiver", "label": "Refund receiver", "format": "addressName", "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.signatures", "label": "Safe signatures", "format": "raw" }
+        ]
+      },
+      "cancelTransaction(bytes32 safeTxHash)": {
+        "intent": "Cancel owner timelock",
+        "fields": [
+          { "path": "#.safeTxHash", "label": "Safe tx hash", "format": "raw" }
+        ]
+      },
+      "scheduleModuleTransaction(address module,address to,uint256 value,bytes data,uint8 operation)": {
+        "intent": "Schedule module transaction",
+        "fields": [
+          { "path": "#.module", "label": "Calling module", "format": "addressName", "params": { "types": ["contract"], "sources": ["local"] } },
+          { "path": "#.to", "label": "Target", "format": "addressName", "params": { "types": ["eoa", "contract", "token"], "sources": ["local", "ens"] } },
+          { "path": "#.value", "label": "Native value", "format": "amount" },
+          { "path": "#.data", "label": "Nested call", "format": "calldata", "params": { "calleePath": "#.to", "amountPath": "#.value" } },
+          { "path": "#.operation", "label": "Operation", "format": "enum", "params": { "$ref": "$.metadata.enums.operation" } }
+        ]
+      },
+      "cancelModuleTransaction(bytes32 moduleTxHash)": {
+        "intent": "Cancel module timelock",
+        "fields": [
+          { "path": "#.moduleTxHash", "label": "Module tx hash", "format": "raw" }
+        ]
+      },
+      "bypassTimelock(address safe,bytes32 safeTxHash)": {
+        "intent": "Bypass owner timelock",
+        "fields": [
+          { "path": "#.safe", "label": "Safe", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.safeTxHash", "label": "Safe tx hash", "format": "raw" }
+        ]
+      },
+      "sweepExpiredOwnerTicket(address safe,bytes32 safeTxHash)": {
+        "intent": "Sweep expired owner ticket",
+        "fields": [
+          { "path": "#.safe", "label": "Safe", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.safeTxHash", "label": "Safe tx hash", "format": "raw" }
+        ]
+      },
+      "sweepExpiredModuleTicket(address safe,bytes32 moduleTxHash)": {
+        "intent": "Sweep expired module ticket",
+        "fields": [
+          { "path": "#.safe", "label": "Safe", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.moduleTxHash", "label": "Module tx hash", "format": "raw" }
+        ]
+      },
+      "triggerLockdown(address safe,bytes32 reasonHash,bytes signer,bytes signature)": {
+        "intent": "Trigger Safe lockdown",
+        "fields": [
+          { "path": "#.safe", "label": "Safe to lock down", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.reasonHash", "label": "Incident reason hash", "format": "raw" },
+          { "path": "#.signer", "label": "Panic signer", "format": "raw" },
+          { "path": "#.signature", "label": "Signature / OTP", "format": "raw" }
+        ]
+      }
+    }
+  }
+}

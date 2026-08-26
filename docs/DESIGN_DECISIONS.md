@@ -1,0 +1,55 @@
+# v1.0.0 Design Decisions and Accepted Limitations
+
+This is the public technical decision record for the first release. It is
+deliberately short: the specification and code remain authoritative, while
+this file records choices that future reviews should not mistake for omissions.
+A decision must be reconsidered if its stated boundary or closure condition no
+longer holds.
+
+| ID | Decision or accepted limitation | Rationale and consequence | Reconsider when |
+| --- | --- | --- | --- |
+| D-01 | Only an already-migrated Safe v1.5.0 is supported. A v1.4.x singleton migration is never bundled with Lockdown installation. | The module guard is load-bearing. Combining a Safe migration with guard installation would enlarge the failure and review surface. | A separately specified and reviewed migration flow is available. |
+| D-02 | Installation/initialisation is one Safe transaction; signer, timelock, and bypasser configuration follows in separately reviewed transactions. | Smaller governance changes are easier to review and recover from. An installation is not “armed” until every required follow-up is confirmed on-chain. | A combined flow can preserve equivalent reviewability and failure handling. |
+| D-03 | The guided v1 installer supports a narrowly qualified pre-state. Existing guards, modules, or custom fallback handlers require explicit compatibility review and are not automatically declared compatible. | Lockdown occupies both guard slots and the fallback-handler slot. Replacing an unknown component can remove unrelated security properties. | Compatibility tests and an explicit composition policy exist for a component. |
+| D-04 | Uninstallation restores Safe slots in three verified stages: remove both Lockdown guards, restore the fallback handler, then restore previous guards with the transaction guard last. It is slot restoration, not a complete historical rollback. | An atomic exit would remove intermediate states, but would add special guard/parser behaviour and audit surface for an infrequent exit path. The staged flow remains understandable and fail-closed when each stage is checked against a trusted pre-install snapshot. Safe nonce, events, Lockdown storage, burnt identities, and ticket history are not erased. | Evidence shows partial exits are a material incident source, or an atomic design is independently specified and audited. |
+| D-05 | Reinstalling the same singleton is allowed, but it resumes that singleton’s persistent per-Safe state; it is not a fresh initialisation. | Uninstalling Safe slots cannot erase storage owned by a singleton. Burnt signer identities remain burnt; configuration, incident state, future-nonce owner tickets, and module tickets can remain relevant. The operator must reconcile state before reinstalling. | A clean-generation requirement justifies an epoch mechanism or a new singleton. |
+| D-06 | `PasswordVerifier` is an intentional one-time-password option. | The preimage is disclosed to the wallet, RPC, and potentially the public mempool. A reverted, rejected, replaced, dropped, or wrong-context attempt can expose the password without burning the signer. Such a password must never be reused; rotate the registered identity before relying on it again. | The disclosure model cannot be made sufficiently clear in every supported operator flow. |
+| D-07 | Timelock-bypasser policy is enforced off-chain; on-chain code enforces only the allowlist and transaction-hash mechanics. | A bypasser is a trusted fast lane. Compromise grants broad owner-path bypass authority even though Safe owner signatures remain required. Policy classification, simulation, monitoring, and incident response are external controls. | A concrete threat requires a non-bypassable on-chain policy floor and its added Solidity surface is audited. |
+| D-08 | The external audit request is Solidity-only. Tooling, UI, descriptors, and hosted services are review context but not findings scope. | This concentrates auditor time on the contracts and Safe integration surface. Public and operational readiness of excluded components remains a separate release gate. | The contracts begin to depend on tooling correctness for an on-chain invariant. |
+| D-09 | The v1.0.0 launch manifest targets Ethereum mainnet only. Future mainnets are enabled individually, never inferred from general EVM compatibility. The compiler target remains Prague; the emitted runtime's verified opcode floor is Cancun. | Ethereum mainnet supports Prague. The current bytecode uses Cancun-era `MCOPY`, `TLOAD`, and `TSTORE` but no Prague-specific opcode. Other chains still require exact-bytecode and Safe integration qualification; the release manifest is authoritative. | A source/compiler change introduces a Prague-specific dependency, or another chain completes every release qualification gate. |
+| D-10 | The first supported public rollback snapshot format is `preinstall-slots.v2`; earlier pre-release formats are not accepted. | The v2 block hash verifies chain context and its checksum detects accidental corruption; neither proves who supplied the file. Backward compatibility would require maintaining additional conversion logic. | A supported public release has emitted a format that must remain recoverable. |
+| D-11 | A pending panic transaction remains `UNCONFIRMED` until a successful receipt and on-chain post-condition checks. There is no client-side timeout that converts pending into success or failure. | A dropped or delayed transaction can leave the helper waiting, but it must never claim the Safe is locked. Operators use the transaction hash and an independent RPC to resolve prolonged ambiguity. | A resumable transaction-status workflow can be added without weakening confirmation semantics. |
+| D-12 | The public repository starts from a reviewed source snapshot without private development history. | Release provenance is established by matching the frozen candidate tree to the public initial tree and by signing the public release tag. Historical development metadata is not part of the product. | A different publication model is chosen before the first public commit. |
+| D-13 | A Normal-state `setResumeDelay` clears an elapsed incident before applying the new delay. | Auto-resume itself remains purely time-based and event-less, so the raw incident fields can linger after the window. Clearing them on the next delay update prevents a prospective configuration change from resurrecting the old recovery window. This also erases the old `reasonHash` from contract storage; `SafeLockedDown` is the durable forensic record. | Raw post-incident storage retention becomes a requirement, in which case the lifecycle needs a separately materialised incident boundary. |
+| D-14 | Safe installation integrity is checked on initialization and continuously off-chain, not on trigger or every Solidity mutation. | A panic trigger must block every path still available rather than reject degraded protection. An incident-time warning event would reveal a possible escape route to the coercer. The UI/monitoring privately re-reads all three Safe slots before the incident and proposes repair. | Off-chain detection cannot meet an operational SLO, or a contract check can improve coverage without weakening degraded-mode liveness or disclosing incident information. |
+| D-15 | Administrative removal permanently burns the exact signer identity; V1 has no per-registration epoch. | Permanent burn carries replay defence for `PasswordVerifier`, which ignores the digest, and emergency signing remains independent of an RPC epoch read. Fresh ERC-7913 key material is cheap to generate and is the re-arm path. | A V1.2 epoch design preserves password anti-replay and offline emergency signing without disproportionate storage or complexity. |
+
+## Reinstallation and persistent tickets
+
+Removing Lockdown from a Safe changes the Safe's guard and fallback-handler
+slots; it cannot clear the per-Safe storage held by the Lockdown singleton.
+Reinstalling the same singleton therefore restores the previous configuration
+and incident state rather than creating a new generation. Burnt identities
+remain burnt. Owner tickets tied to already-consumed Safe nonces are inert, but
+future-nonce owner tickets and module tickets can survive until they are
+consumed, cancelled, or expire and are swept.
+
+Before declaring a reinstallation armed, the operator must reconstruct pending
+tickets from events, compare owner tickets with the current Safe nonce,
+cancel or sweep tickets that should not survive, and verify incident state,
+signers, recovery owners, timelock, and bypassers. The v1.0.0 design
+deliberately has no installation epoch. Deploying a separately reviewed new
+singleton is the clean-state path if state continuity is not acceptable.
+
+## Operator obligations retained outside Solidity
+
+- Capture and export the pre-install snapshot before approving installation;
+  verify its origin and keep a copy that does not depend on Runtime Capital
+  availability.
+- Export or otherwise preserve every Safe transaction required for a staged
+  rollback before executing stage 1.
+- Treat any non-confirmed password-trigger attempt as disclosure and rotate it.
+- Independently verify chain, Safe, singleton, handler, runtime codehashes, and
+  final state before declaring an installation armed or an incident resolved.
+- Preserve bypass-ticket observability and incident ownership outside the
+  contracts.

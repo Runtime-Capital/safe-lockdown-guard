@@ -1,0 +1,14 @@
+{
+  "lib/forge-std": {
+    "rev": "620536fa5277db4e3fd46772d5cbc1ea0696fb43"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "cab19933c33c2ad1d4c7a84864a3601dddfd16f3"
+  },
+  "lib/safe-smart-account": {
+    "tag": {
+      "name": "v1.5.0",
+      "rev": "dc437e8fba8b4805d76bcbd1c668c9fd3d1e83be"
+    }
+  }
+}

@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: default
+
+jobs:
+  test:
+    name: Forge test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Verify manifest build codehashes
+        run: scripts/gen-manifest-codehashes.sh --check-manifest deploy/manifest.json
+
+      - name: Lint
+        run: forge lint
+
+      - name: Format
+        run: forge fmt --check
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Coverage
+        env:
+          FOUNDRY_PROFILE: coverage
+        run: forge coverage --ir-minimum
+
+  operator-artifacts:
+    name: Operator artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+
+      - name: Install locked browser dependencies
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+
+      - name: Validate operator artifacts
+        run: make operator-check
+
+  # Gas impact of a PR vs its base branch. Fork-safe by design: this job holds
+  # NO write token and only uploads the rendered diff as an artifact; the
+  # companion `Post Gas Diff Comment` workflow (triggered on this workflow's
+  # completion) is what posts the sticky PR comment with pull-requests: write.
+  gas-diff:
+    name: Gas diff
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+          # Full history so the action can snapshot the base ref too.
+          fetch-depth: 0
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+
+      # Snapshots base vs head and renders a markdown diff. Fuzz tests are
+      # excluded (include-fuzz-tests: false) because their gas medians jitter
+      # run-to-run without a pinned seed and would add noise, not signal.
+      - name: Generate gas diff
+        id: gas_diff
+        uses: atarpara/foundry-snapshot-diff@75ec07f51e62f841b74d17d0022523bac12ecdac # v0.9
+        with:
+          foundry-profile: default
+          include-fuzz-tests: "false"
+
+      - name: Save gas diff output
+        env:
+          MARKDOWN: ${{ steps.gas_diff.outputs.markdown }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          mkdir -p ./gas-diff
+          printf '%s' "$PR_NUMBER" > gas-diff/pr-number.txt
+          if [ -n "$MARKDOWN" ]; then
+            printf '%s' "$MARKDOWN" > gas-diff/comment.md
+          fi
+
+      - name: Upload gas diff artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gas-diff
+          path: gas-diff/
+          if-no-files-found: error

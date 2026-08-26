@@ -1,0 +1,26 @@
+/cache/
+/out/
+/broadcast/
+/.forge-snapshots/
+/crytic-export/
+/mutation-work/
+/medusa-corpus/
+/reproducibility/
+/node_modules/
+/test-results/
+slither-report*.json
+slither_results.json
+/test/echidna/corpus/
+/test/echidna/covered.*.html
+/test/echidna/crytic-export/
+
+# Local/private deployment data.
+/config/*.local.json
+/deploy/*.local.*
+/deploy/*-rabby.txt
+/clear-signing/*.local.json
+/clear-signing/*.rendered.json
+/recovery-txs*.json
+
+# Coverage output.
+/lcov.info
