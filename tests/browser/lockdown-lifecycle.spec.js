@@ -19,6 +19,14 @@ const ACCOUNT = "0x0000000000000000000000000000000000000abc";
 const MODULE = "0x000000000000000000000000000000000000d00d";
 const PREV_MODULE = "0x0000000000000000000000000000000000000001";
 const MODULE_TX_HASH = "0x" + "44".repeat(32);
+// Well-known Anvil/Hardhat test key #0: a throwaway burner for local-verify tests.
+const BURNER_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const BURNER_ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+const PLAIN_EOA = "0x000000000000000000000000000000000000e0a1";
+// Addresses the mock reports as code-less EOAs; everything else has code.
+const NO_CODE = new Set([BURNER_ADDR, PLAIN_EOA]);
+// Former on-chain drill selector; the UI must never call it.
+const TEST_SIGNER_SELECTOR = "0x7b3eb6ca";
 
 const OPERATOR_MUTATION_CONTROLS = {
   initialize: "#buildInitialize",
@@ -56,7 +64,6 @@ const SELECTORS = {
   getModuleTransactionHash: "0x3298706e",
   isLockdownSigner: "0xe4e1703d",
   isSignerBurntPermanently: "0xbb10301d",
-  testSigner: "0x7b3eb6ca",
   lockdown: "0x08be071c"
 };
 
@@ -194,9 +201,11 @@ function installRpcMock(page, rpcURL) {
   let slotMode = "preinstall";
   let signerBurnt = false;
   let blockMode = "canonical";
+  const requests = [];
   const escaped = rpcURL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const routePromise = page.route(new RegExp(`^${escaped}/?$`), async (route) => {
     const body = route.request().postDataJSON();
+    requests.push(JSON.stringify(body));
     const calls = Array.isArray(body) ? body : [body];
     const replies = calls.map((call) => ({ jsonrpc: "2.0", id: call.id, result: rpcResult(call.method, call.params || [], lifecycleMode, slotMode, signerBurnt, blockMode) }));
     await route.fulfill({
@@ -205,6 +214,7 @@ function installRpcMock(page, rpcURL) {
     });
   });
   return routePromise.then(() => ({
+    requests: () => requests.slice(),
     enableRecovery: () => { lifecycleMode = "recovery"; },
     enableLocked: () => { lifecycleMode = "locked"; signerBurnt = true; },
     disableRecovery: () => { lifecycleMode = "normal"; },
@@ -219,7 +229,7 @@ function installRpcMock(page, rpcURL) {
 
 function rpcResult(method, params, lifecycleMode, slotMode, signerBurnt, blockMode) {
   if (method === "eth_chainId") return "0x1";
-  if (method === "eth_getCode") return "0x6000";
+  if (method === "eth_getCode") return NO_CODE.has(String(params[0] || "").toLowerCase()) ? "0x" : "0x6000";
   if (method === "eth_getStorageAt") {
     const slot = String(params[1] || "").toLowerCase();
     if (slot === SAFE_GUARD_SLOT || slot === SAFE_MODULE_GUARD_SLOT) {
@@ -256,7 +266,6 @@ function rpcResult(method, params, lifecycleMode, slotMode, signerBurnt, blockMo
     if (data.startsWith(SELECTORS.getModuleTransactionHash)) return MODULE_TX_HASH;
     if (data.startsWith(SELECTORS.isLockdownSigner)) return `0x${encodeBool(true)}`;
     if (data.startsWith(SELECTORS.isSignerBurntPermanently)) return `0x${encodeBool(signerBurnt)}`;
-    if (data.startsWith(SELECTORS.testSigner)) return `0x${encodeBool(true)}`;
     return "0x";
   }
   if (method === "eth_blockNumber") return "0x1";
@@ -430,8 +439,40 @@ test.describe("lockdown lifecycle helper browser smoke", () => {
 
     await page.fill("#tlSingleton", SINGLETON);
     await page.fill("#tlDelay", "86400");
+    // Activating the timelock proposes ERC-1271 off in the same batch (H.27):
+    // [setErc1271Allowed(false), setTimelockDelay(delay)], flag call first.
+    await expect(page.locator("#tlErc1271")).toHaveValue("off");
     const timelock = await clickAndWaitForPreview(page, "#buildSetTimelock");
     expect(timelock.decoded.action).toBe("setTimelockDelay");
+    expect(timelock.decoded.erc1271).toBe("off");
+    expect(timelock.decoded.warnings).toEqual([]);
+    const tlTxs = timelock.transactionBuilderJson.transactions;
+    expect(tlTxs).toHaveLength(2);
+    expect(tlTxs.map((tx) => tx.to.toLowerCase())).toEqual([SINGLETON, SINGLETON]);
+    expect(tlTxs[0].data).toBe(await page.evaluate(() => new ethers.Interface(["function setErc1271Allowed(bool)"]).encodeFunctionData("setErc1271Allowed", [false])));
+    expect(tlTxs[1].data).toBe(await page.evaluate(() => new ethers.Interface(["function setTimelockDelay(uint64)"]).encodeFunctionData("setTimelockDelay", [86400])));
+
+    // Keeping ERC-1271 on with a timelock is allowed but flagged.
+    await page.selectOption("#tlErc1271", "on");
+    const timelockOn = await clickAndWaitForPreview(page, "#buildSetTimelock");
+    expect(timelockOn.transactionBuilderJson.transactions).toHaveLength(2);
+    expect(timelockOn.transactionBuilderJson.transactions[0].contractInputsValues.allowed).toBe(true);
+    expect(timelockOn.decoded.warnings).toHaveLength(1);
+    expect(timelockOn.decoded.warnings[0]).toContain("NM-1060 6.1");
+
+    // Leaving it unchanged builds the single call and warns.
+    await page.selectOption("#tlErc1271", "unchanged");
+    const timelockBare = await clickAndWaitForPreview(page, "#buildSetTimelock");
+    expect(timelockBare.transactionBuilderJson.transactions).toHaveLength(1);
+    expect(timelockBare.transactionBuilderJson.transactions[0].data).toBe(tlTxs[1].data);
+    expect(timelockBare.decoded.warnings[0]).toContain("NM-1060 6.1");
+
+    // Turning the timelock off leaves the flag alone by default, no warning.
+    await page.fill("#tlDelay", "0");
+    await expect(page.locator("#tlErc1271")).toHaveValue("unchanged");
+    const timelockOff = await clickAndWaitForPreview(page, "#buildSetTimelock");
+    expect(timelockOff.transactionBuilderJson.transactions).toHaveLength(1);
+    expect(timelockOff.decoded.warnings).toEqual([]);
 
     await page.fill("#tlBypasser", BYPASSER);
     await page.selectOption("#tlBypasserEnabled", "true");
@@ -480,7 +521,90 @@ test.describe("lockdown lifecycle helper browser smoke", () => {
     await expect(page.locator("#previewOut")).not.toHaveText("No transaction generated yet.");
     const install = await preview(page);
     expect(install.decoded.action).toBe("install");
-    expect(install.transactionBuilderJson.transactions).toHaveLength(4);
+    expect(install.decoded.includeInitialize).toBe(true);
+    // SPEC_V1 H.27 install default: no timelock planned (initTimelockDelay is 0),
+    // so the helper pre-ticks the ERC-1271 opt-in and the batch carries the
+    // fifth call. The first four calls are the atomic slot + initialize install.
+    expect(install.decoded.allowErc1271).toBe(true);
+    expect(install.decoded.warnings).toEqual([]);
+    const installTxsWithOptIn = install.transactionBuilderJson.transactions;
+    expect(installTxsWithOptIn).toHaveLength(5);
+    const installTxs = installTxsWithOptIn.slice(0, 4);
+    // Exact selectors, order and targets: three Safe self-calls wiring the slots,
+    // then initialize on the singleton (SPEC_V1 §8.1 atomic install). A
+    // reordered, retargeted or extra call (e.g. addOwnerWithThreshold) must fail.
+    const installSelectors = await page.evaluate(() => [
+      "setGuard(address)",
+      "setModuleGuard(address)",
+      "setFallbackHandler(address)",
+      "initialize(uint64,uint64,address[],bytes[])"
+    ].map((sig) => ethers.id(sig).slice(0, 10)));
+    expect(installTxs.map((tx) => tx.data.slice(0, 10))).toEqual(installSelectors);
+    expect(installTxs.map((tx) => tx.to.toLowerCase())).toEqual([SAFE, SAFE, SAFE, SINGLETON]);
+    expect(installTxs.map((tx) => tx.operation)).toEqual([0, 0, 0, 0]);
+    expect(installTxs.map((tx) => tx.value)).toEqual(["0", "0", "0", "0"]);
+    const installArgs = await page.evaluate((txs) => {
+      const safeIface = new ethers.Interface([
+        "function setGuard(address)",
+        "function setModuleGuard(address)",
+        "function setFallbackHandler(address)"
+      ]);
+      const lockdownIface = new ethers.Interface(["function initialize(uint64,uint64,address[],bytes[])"]);
+      const init = lockdownIface.decodeFunctionData("initialize", txs[3].data);
+      return {
+        guard: safeIface.decodeFunctionData("setGuard", txs[0].data)[0].toLowerCase(),
+        moduleGuard: safeIface.decodeFunctionData("setModuleGuard", txs[1].data)[0].toLowerCase(),
+        fallbackHandler: safeIface.decodeFunctionData("setFallbackHandler", txs[2].data)[0].toLowerCase(),
+        recoveryOwners: Array.from(init[2]).map((a) => a.toLowerCase()),
+        initialSigners: Array.from(init[3]).map((s) => s.toLowerCase())
+      };
+    }, installTxs);
+    expect(installArgs.guard).toBe(SINGLETON);
+    expect(installArgs.moduleGuard).toBe(SINGLETON);
+    expect(installArgs.fallbackHandler).toBe(FALLBACK_HANDLER);
+    expect(installArgs.recoveryOwners).toEqual([BACKUP]);
+    expect(installArgs.initialSigners.length).toBeGreaterThanOrEqual(1);
+    expect(installArgs.initialSigners).toEqual([EOA_A]);
+    // Planning a timelock in step 3 flips the default: the helper pre-unticks
+    // the opt-in (an off-chain signature settles with no timelock window) and
+    // the batch drops back to the four install calls, byte-identical.
+    await page.fill("#initTimelockDelay", "3600");
+    await expect(page.locator("#installAllowErc1271")).not.toBeChecked();
+    await expect(page.locator("#installErc1271Hint")).toContainText("Pre-unticked");
+    await page.waitForTimeout(300);
+    await page.click("#buildInstall");
+    await expect(page.locator("#previewOut")).not.toHaveText(JSON.stringify(install, null, 2));
+    const installHardened = await preview(page);
+    expect(installHardened.decoded.allowErc1271).toBe(false);
+    expect(installHardened.transactionBuilderJson.transactions).toHaveLength(4);
+    expect(installHardened.transactionBuilderJson.transactions.map((tx) => tx.data)).toEqual(installTxs.map((tx) => tx.data));
+
+    // Overriding the hardening by hand (timelock planned AND opt-in ticked) is
+    // allowed but flagged: the batch carries the fifth call and a warning names
+    // the re-opened residual (NM-1060 6.1, AR-15).
+    await page.check("#installAllowErc1271");
+    await page.waitForTimeout(300);
+    await page.click("#buildInstall");
+    await expect(page.locator("#previewOut")).not.toHaveText(JSON.stringify(installHardened, null, 2));
+    const installOverride = await preview(page);
+    expect(installOverride.decoded.allowErc1271).toBe(true);
+    expect(installOverride.decoded.warnings).toHaveLength(1);
+    expect(installOverride.decoded.warnings[0]).toContain("NM-1060 6.1");
+    expect(installOverride.transactionBuilderJson.transactions).toHaveLength(5);
+
+    // Back to no timelock: pre-ticked again, same five calls as the first build.
+    await page.fill("#initTimelockDelay", "0");
+    await expect(page.locator("#installAllowErc1271")).toBeChecked();
+    await expect(page.locator("#installErc1271Hint")).toContainText("Pre-ticked");
+    const optInTxs = installTxsWithOptIn;
+    expect(optInTxs.slice(0, 4).map((tx) => tx.data)).toEqual(installTxs.map((tx) => tx.data));
+    expect(optInTxs[4].to.toLowerCase()).toBe(SINGLETON);
+    expect(optInTxs[4].operation).toBe(0);
+    expect(optInTxs[4].value).toBe("0");
+    const optInSelector = await page.evaluate(() => ethers.id("setErc1271Allowed(bool)").slice(0, 10));
+    expect(optInTxs[4].data.slice(0, 10)).toBe(optInSelector);
+    expect(await page.evaluate((data) => new ethers.Interface(["function setErc1271Allowed(bool)"]).decodeFunctionData("setErc1271Allowed", data)[0], optInTxs[4].data)).toBe(true);
+    await page.uncheck("#installAllowErc1271");
 
     rpc.disableRecovery();
     rpc.installLockdownSlots();
@@ -637,15 +761,74 @@ test.describe("lockdown lifecycle helper browser smoke", () => {
     expect(["1", "0x1"]).toContain(String(typedData.domain.chainId));
     expect(typedData.types.Lockdown).toEqual([
       { name: "safe", type: "address" },
+      { name: "signer", type: "bytes" },
       { name: "reasonHash", type: "bytes32" }
     ]);
     expect(typedData.message.safe.toLowerCase()).toBe(SAFE);
+    expect(typedData.message.signer.toLowerCase()).toBe(ACCOUNT.toLowerCase());
 
     const methods = await page.evaluate(() => window.__walletCalls.map((c) => c.method));
     expect(methods).toContain("eth_signTypedData_v4");
     expect(methods).not.toContain("eth_sign");
     expect(methods).not.toContain("personal_sign");
 
+  });
+
+  test("local verify checks ECDSA signatures in the browser and never sends them to the RPC", async ({ page }) => {
+    const rpcURL = "http://127.0.0.1:9850";
+    const rpc = await installRpcMock(page, rpcURL);
+    await page.goto(`${baseURL}/deploy/lockdown-lifecycle.html`, { waitUntil: "networkidle" });
+    await fillBaseFields(page, rpcURL);
+    await expect(page.locator("#drillVerify")).toHaveCount(0);
+    await expect(page.locator("#allowPasswordDrill")).toHaveCount(0);
+
+    async function signAndVerify(identity, reason) {
+      await page.fill("#trigSafe", SAFE);
+      await page.fill("#trigSingleton", SINGLETON);
+      await page.selectOption("#trigType", "ecdsa");
+      await page.fill("#trigMat", identity);
+      await page.fill("#trigReasonText", reason);
+      await clickAndWaitForJson(page, "#buildDigest", "#triggerOut");
+      await page.fill("#trigPrivKey", BURNER_PK);
+      const signed = await clickAndWaitForJson(page, "#signWithKey", "#triggerOut");
+      expect(signed.signature).toMatch(/^0x[0-9a-f]{130}$/);
+      const mark = rpc.requests().length;
+      const verified = await clickAndWaitForJson(page, "#verifyLocally", "#triggerOut");
+      const sent = rpc.requests().slice(mark).join("\n").toLowerCase();
+      expect(sent, "the signature must never reach the RPC").not.toContain(signed.signature.slice(2).toLowerCase());
+      expect(sent, "no on-chain testSigner drill").not.toContain(TEST_SIGNER_SELECTOR.slice(2));
+      return verified;
+    }
+
+    // Signature recovers to the identity: verified locally, submit enabled.
+    const pass = await signAndVerify(BURNER_ADDR, "local-verify-pass");
+    expect(pass.step).toBe("local-verify");
+    expect(pass.status).toBe("pass");
+    expect(pass.verdict).toMatch(/^PASS/);
+    await expect(page.locator("#submitTrigger")).toBeEnabled();
+
+    // Code-less EOA identity, signature from another key: hard fail, submit stays disabled.
+    const fail = await signAndVerify(PLAIN_EOA, "local-verify-fail");
+    expect(fail.status).toBe("fail");
+    expect(fail.verdict).toMatch(/^FAIL/);
+    await expect(page.locator("#submitTrigger")).toBeDisabled();
+
+    // Identity with code (ERC-1271 / EIP-7702): cannot be checked locally, warn but allow.
+    const unverifiable = await signAndVerify(ACCOUNT, "local-verify-1271");
+    expect(unverifiable.status).toBe("unverifiable");
+    expect(unverifiable.verdict).toMatch(/^UNVERIFIED/);
+    expect(unverifiable.warning).toContain("script/DrillSigner.s.sol");
+    await expect(page.locator("#submitTrigger")).toBeEnabled();
+
+    // EIP-7702: the signature recovers to the identity, but the identity now has
+    // code, so on-chain verification takes the ERC-1271 branch. No local pass.
+    NO_CODE.delete(BURNER_ADDR);
+    try {
+      const delegated = await signAndVerify(BURNER_ADDR, "local-verify-7702");
+      expect(delegated.status).toBe("unverifiable");
+    } finally {
+      NO_CODE.add(BURNER_ADDR);
+    }
   });
 
   test("phase 4: panic submit waits for receipt and verifies LockedDown post-conditions", async ({ page }) => {

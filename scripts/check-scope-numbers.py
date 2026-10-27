@@ -42,6 +42,7 @@ SCOPE_FILES = [
     "src/handlers/LockdownFallbackHandler.sol",
     "src/base/LockdownSigners.sol",
     "src/base/RecoveryOwners.sol",
+    "src/base/Erc1271Policy.sol",
     "src/utils/LockdownLib.sol",
     "src/verifiers/WebAuthnVerifier.sol",
     "src/verifiers/PasswordVerifier.sol",
@@ -92,7 +93,14 @@ CLAIMS = {
     "scope_file_count": {
         "label": "number of Solidity files in scope",
         "repo": ["README.md", "AUDIT_BRIEF.md"],
-        "external": ["SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html"],
+        "external": [
+            "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html",
+            "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf",
+            "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt",
+            "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html",
+            "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf",
+            "grant/ARETA_APPLICATION_ANSWERS.md",
+        ],
     },
     "test_total": {
         "label": "forge test total",
@@ -114,7 +122,7 @@ CLAIMS = {
     },
     "poc_test_total": {
         "label": "adversarial PoC tests in test/poc/",
-        "repo": ["AUDIT_BRIEF.md", "docs/V1_REVIEW_PROMPT.md", "docs/PRE_TAG_REVIEW_DISPOSITIONS.md"],
+        "repo": ["AUDIT_BRIEF.md", "docs/V1_REVIEW_PROMPT.md"],
         "external": [
             "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html",
             "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf",
@@ -126,7 +134,7 @@ CLAIMS = {
     },
     "poc_file_count": {
         "label": "files in test/poc/",
-        "repo": ["docs/V1_REVIEW_PROMPT.md", "docs/PRE_TAG_REVIEW_DISPOSITIONS.md"],
+        "repo": ["docs/V1_REVIEW_PROMPT.md"],
         "external": [],
     },
     "lockdown_timelock_runtime": {
@@ -161,28 +169,33 @@ U = r"\d+(?:[,  ]\d{3})*"
 PATTERNS = {
     "loc_total": {
         "README.md": rf"Solidity \| {N} physical lines",
-        "AUDIT_BRIEF.md": rf"Total \(10 files\)\*\*\s*\|\s*\*\*{N}\*\*\s*\|\s*\*\*{U}\*\*",
+        "AUDIT_BRIEF.md": rf"Total \({U} files\)\*\*\s*\|\s*\*\*{N}\*\*\s*\|\s*\*\*{U}\*\*",
         "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html": rf"Total {N} {U}",
         "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf": rf"{N} {U} Total",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"10 production Solidity files.*?{N} physical lines",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"10 production Solidity files.*?{N} physical lines",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"10 production Solidity files.*?{N} physical lines",
-        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains 10 Solidity files, {N} physical lines",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"{U} production Solidity files.*?{N} physical lines",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"{U} production Solidity files.*?{N} physical lines",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"{U} production Solidity files.*?{N} physical lines",
+        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains {U} Solidity files, {N} physical lines",
     },
     "nsloc_total": {
-        "README.md": rf"10 source files, {N} nSLOC",
-        "AUDIT_BRIEF.md": rf"Total \(10 files\)\*\*\s*\|\s*\*\*{U}\*\*\s*\|\s*\*\*{N}\*\*",
-        "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html": rf"In scope: 10 files, {N} nSLOC",
-        "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf": rf"In scope: 10 files, {N} nSLOC",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"10 production Solidity files, {N} non-blank non-comment source lines",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"10 production Solidity files, {N} non-blank non-comment source lines",
-        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"10 production Solidity files, {N} non-blank non-comment source lines",
-        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains 10 Solidity files, {U} physical lines and {N} non-blank",
+        "README.md": rf"{U} source files, {N} nSLOC",
+        "AUDIT_BRIEF.md": rf"Total \({U} files\)\*\*\s*\|\s*\*\*{U}\*\*\s*\|\s*\*\*{N}\*\*",
+        "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html": rf"In scope: {U} files, {N} nSLOC",
+        "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf": rf"In scope: {U} files, {N} nSLOC",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"{U} production Solidity files, {N} non-blank non-comment source lines",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"{U} production Solidity files, {N} non-blank non-comment source lines",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"{U} production Solidity files, {N} non-blank non-comment source lines",
+        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains {U} Solidity files, {U} physical lines and {N} non-blank",
     },
     "scope_file_count": {
         "README.md": rf"physical lines across {N} source files",
         "AUDIT_BRIEF.md": rf"Total \({N} files\)",
         "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.html": rf"In scope: {N} files",
+        "SAFE_LOCKDOWN_GUARD_AUDIT_SCOPE.pdf": rf"In scope: {N} files",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"{N} production Solidity files",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"{N} production Solidity files",
+        "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"{N} production Solidity files",
+        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains {N} Solidity files",
     },
     "test_total": {
         "README.md": rf"Tests \| {N} Foundry",
@@ -195,7 +208,7 @@ PATTERNS = {
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"{N} Foundry unit, fuzz, integration",
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"{N} Foundry unit, fuzz, integration",
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"{N} Foundry unit, fuzz, integration",
-        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains 10 Solidity files.*?repository contains {N} Foundry",
+        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains {U} Solidity files.*?repository contains {N} Foundry",
     },
     "poc_test_total": {
         "AUDIT_BRIEF.md": rf"\+ {N} [^+]{{0,100}}test/poc/.*?adversarial proofs",
@@ -206,7 +219,7 @@ PATTERNS = {
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.txt": rf"and {N} adversarial PoCs",
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.html": rf"and {N} adversarial PoCs",
         "grant/ARETA_MARKETPLACE_AUDIT_REQUEST.pdf": rf"and {N} adversarial PoCs",
-        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains 10 Solidity files.*?and {N} adversarial PoCs",
+        "grant/ARETA_APPLICATION_ANSWERS.md": rf"production scope contains {U} Solidity files.*?and {N} adversarial PoCs",
     },
     "poc_file_count": {
         "docs/V1_REVIEW_PROMPT.md": rf"across the {N} files in.*?test/poc/",

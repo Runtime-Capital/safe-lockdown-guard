@@ -105,6 +105,14 @@ abstract contract TestEnvironment is Test, DeployLockdown {
         );
     }
 
+    /// @dev Opts `instance` in to ERC-1271 via the owner path (SPEC_V1 H.27). Only
+    ///      valid while `timelockDelay == 0`; under a timelock the call must be scheduled.
+    function _allowErc1271(ISafe instance) internal {
+        _execAsOwner(
+            instance, address(guard), 0, abi.encodeCall(Lockdown.setErc1271Allowed, (true)), Enum.Operation.Call
+        );
+    }
+
     function _triggerLockdown(ISafe instance, bytes32 reasonHash) internal {
         guard.triggerLockdown(
             address(instance), reasonHash, abi.encodePacked(panicKey), _signTrigger(instance, PANIC_PK, reasonHash)
@@ -152,6 +160,7 @@ abstract contract TestEnvironment is Test, DeployLockdown {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev Signs the trigger digest for the 20-byte ECDSA identity of `privateKey`.
     function _signTrigger(ISafe instance, uint256 privateKey, bytes32 reasonHash) internal view returns (bytes memory) {
         (
             bytes1 fields,
@@ -163,7 +172,11 @@ abstract contract TestEnvironment is Test, DeployLockdown {
         ) = guard.eip712Domain();
         bytes32 digest = MessageHashUtils.toTypedDataHash(
             MessageHashUtils.toDomainSeparator(fields, name, version, chainId, verifyingContract, salt),
-            keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), instance, reasonHash))
+            keccak256(
+                abi.encode(
+                    guard.LOCKDOWN_TYPEHASH(), instance, keccak256(abi.encodePacked(vm.addr(privateKey))), reasonHash
+                )
+            )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         return abi.encodePacked(r, s, v);

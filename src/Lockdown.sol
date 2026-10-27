@@ -16,6 +16,7 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 // Lockdown
 import {LockdownFallbackHandler} from "./handlers/LockdownFallbackHandler.sol";
+import {Erc1271Policy} from "./base/Erc1271Policy.sol";
 import {LockdownSigners} from "./base/LockdownSigners.sol";
 import {RecoveryOwners} from "./base/RecoveryOwners.sol";
 import {StateMachine} from "./base/StateMachine.sol";
@@ -24,7 +25,15 @@ import {LockdownLib} from "./utils/LockdownLib.sol";
 /// @title Lockdown
 /// @notice Base version of LockdownFull, without the timelock.
 /// @custom:security-contact contact@runtime.capital
-contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, RecoveryOwners, StateMachine {
+contract Lockdown is
+    ITransactionGuard,
+    IModuleGuard,
+    EIP712,
+    LockdownSigners,
+    RecoveryOwners,
+    Erc1271Policy,
+    StateMachine
+{
     string public constant VERSION = "1.0.0";
 
     address public immutable MULTI_SEND_CALL_ONLY;
@@ -162,6 +171,21 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
         super.setResumeDelay(newDelay);
     }
 
+    /// @notice Opts the calling Safe in to (or back out of) ERC-1271 signature
+    ///         validation by its `LockdownFallbackHandler` (SPEC_V1 H.27).
+    /// @dev    Owner-path Safe self-call, `onlyNormal` like the other config
+    ///         setters: it cannot be set before `initialize` (but may follow it
+    ///         in the same install MultiSend) nor during an incident. Modules
+    ///         cannot reach it (`ModuleCallToSingletonDenied`). It is NOT a
+    ///         timelock meta-call, so on `LockdownTimelock` with
+    ///         `timelockDelay > 0` it must be scheduled and waits the delay.
+    ///         Enabling it while `timelockDelay > 0` is an operator-accepted
+    ///         residual of NM-1060 6.1: an off-chain signature settles with no
+    ///         timelock reaction window.
+    function setErc1271Allowed(bool allowed) public virtual override onlyNormal(msg.sender) {
+        super.setErc1271Allowed(allowed);
+    }
+
     function addRecoveryOwner(address owner) public virtual override onlyNormal(msg.sender) {
         super.addRecoveryOwner(owner);
     }
@@ -209,24 +233,32 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
     // -------------------------------------------------------------------
 
     /// @notice Locks down owner-path and module-path execution on `safe`
-    ///         for `lockdownDuration[safe]`. Authority is the registered
+    ///         for `lockdownDuration[safe]`, stacked on top of any active
+    ///         lockdown window. Authority is the registered
     ///         ERC-7913 signer identity; authorisation is checked by OZ
     ///         `SignatureChecker` against the EIP-712 message hash.
-    /// @dev Verify-then-burn (SPEC_V1 §5.2): signature verification observes
-    ///      the same pre-burn state as `testSigner`. After verification, the
-    ///      signer is removed and permanently burnt before the lockdown state
-    ///      is set. The whole sequence remains atomic on revert.
+    /// @dev Verify-then-burn (SPEC_V1 §5.2): the signature is verified against
+    ///      the pre-burn state. After verification, the signer is removed and
+    ///      permanently burnt before the lockdown state is set. The whole
+    ///      sequence remains atomic on revert.
+    ///
+    ///      There is deliberately no on-chain view to test a signature without
+    ///      burning the signer (SPEC_V1 §6.4, §H.25): a drill that sends a real
+    ///      trigger signature to an RPC exposes a signature anyone can submit
+    ///      here. Drill off-chain instead (`script/DrillSigner.s.sol` against a
+    ///      local fork). A drill signature is still a live trigger until its
+    ///      identity is burnt or removed: rotate the identity if it may have
+    ///      leaked.
     function triggerLockdown(address safe, bytes32 reasonHash, bytes calldata signer, bytes calldata signature)
         public
         virtual
         onlyInitialized(safe)
     {
         // Preserve the existing cheap `Unknown` rejection before dispatching
-        // to the identity's verifier. `testSigner` is the single verification
-        // path used by both drills and production triggers.
+        // to the identity's verifier.
         require(isLockdownSigner(safe, signer), LockdownSigners_Unknown());
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe, reasonHash)));
-        require(testSigner(signer, digest, signature), BadSignature());
+        bytes32 digest = _hashLockdownTrigger(safe, signer, reasonHash);
+        require(SignatureChecker.isValidSignatureNow(signer, digest, signature), BadSignature());
 
         // Effects follow verification. The shared helper keeps the permanent
         // burn (INV-SIGN-7) and event semantics identical to admin removal;
@@ -245,17 +277,20 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
     // Views
     // -------------------------------------------------------------------
 
-    /// @notice Pure signer sanity test and the verification source of truth
-    ///         used by `triggerLockdown`. Returns the outcome instead of
-    ///         reverting and never touches singleton state. Intended use: a
-    ///         Safe quorum testing a candidate signer with real key material
-    ///         and a real signature. Also useful as a drill primitive that
-    ///         does NOT consume a registered signer.
-    /// @dev    Safe-to-call for ECDSA / ERC-1271 / WebAuthn-style signatures.
-    ///         UNSAFE for password / commit-reveal verifiers: the password
-    ///         preimage would be leaked over RPC. Use throwaway passwords only.
-    function testSigner(bytes calldata signer, bytes32 hash, bytes calldata signature) public view returns (bool ok) {
-        return SignatureChecker.isValidSignatureNow(signer, hash, signature);
+    /// @notice The EIP-712 digest `triggerLockdown` verifies for `signer` on
+    ///         `safe` with `reasonHash`. Signing tools and the off-chain drill
+    ///         (`script/DrillSigner.s.sol`) read it here instead of re-encoding
+    ///         the message (SPEC_V1 §6.4, §H.29).
+    /// @dev Shares `_hashLockdownTrigger` with `triggerLockdown`, so the two
+    ///      cannot diverge. Takes no signature and verifies nothing: unlike the
+    ///      removed `testSigner` (§H.25), calling it over an RPC leaks no
+    ///      usable trigger.
+    function hashLockdownTrigger(address safe, bytes calldata signer, bytes32 reasonHash)
+        external
+        view
+        returns (bytes32)
+    {
+        return _hashLockdownTrigger(safe, signer, reasonHash);
     }
 
     function getConfigSnapshot(address safe)
@@ -328,7 +363,7 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
         bytes calldata data,
         Enum.Operation operation,
         address module
-    ) public virtual override returns (bytes32 moduleTxHash) {
+    ) public virtual override returns (bytes32) {
         (State state,) = getState(msg.sender);
         if (state == State.Uninitialised) {
             // Anti-brick: legitimate module CALLs still pass before initialize,
@@ -353,7 +388,7 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
 
     function checkAfterModuleExecution(
         bytes32,
-        /* txHash */
+        /* moduleTxHash */
         bool success
     )
         public
@@ -408,9 +443,9 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
                 // The guard hooks are internal machinery the Safe invokes directly
                 // around execution; they must never be reachable as the `to` of an
                 // execTransaction. Otherwise an owner-path (or pre-scheduled) call to
-                // `checkAfterModuleExecution` clears the module-reentrancy in-flight
-                // slot mid-flight and lets one scheduled module ticket execute twice
-                // (INV-TIME-11). Deny on every path, including owner-path admin.
+                // `checkAfterModuleExecution(hash, false)` would (re-)create an
+                // immediately executable module ticket for any module tx, bypassing
+                // the timelock. Deny on every path, including owner-path admin.
                 require(!_isGuardHookSelector(data), GuardHookSelfCallDenied());
                 // Modules can NEVER administer the Lockdown singleton, in ANY
                 // state including pre-initialisation, directly or nested inside a
@@ -496,8 +531,9 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
     /// @dev The four guard-hook selectors. They are invoked by the Safe as part of
     ///      its own execution machinery; routing them through a user transaction
     ///      (`execTransaction` / a scheduled ticket) is never legitimate and would
-    ///      corrupt the transient module-reentrancy state, so they are rejected as
-    ///      a singleton `to` on every path (INV-TIME-11).
+    ///      let the Safe forge module-timelock tickets (`checkAfterModuleExecution`
+    ///      re-creates tickets on failure), so they are rejected as a singleton `to`
+    ///      on every path.
     function _isGuardHookSelector(bytes calldata data) private pure returns (bool) {
         if (data.length < 4) return false;
 
@@ -532,6 +568,18 @@ contract Lockdown is ITransactionGuard, IModuleGuard, EIP712, LockdownSigners, R
     // -------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------
+
+    /// @dev `Lockdown(address safe,bytes signer,bytes32 reasonHash)`, with the
+    ///      `bytes` identity hashed per EIP-712 so a signature binds the exact
+    ///      identity it was produced for (SPEC_V1 §H.23). Single source of the
+    ///      trigger digest for `triggerLockdown` and `hashLockdownTrigger`.
+    function _hashLockdownTrigger(address safe, bytes calldata signer, bytes32 reasonHash)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe, keccak256(signer), reasonHash)));
+    }
 
     /// @dev Both the ABI head `offset` and the declared `length` are attacker-controlled
     ///      full-width words, so every bound is checked by SUBTRACTION against

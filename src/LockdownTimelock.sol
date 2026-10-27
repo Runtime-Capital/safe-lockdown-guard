@@ -3,8 +3,6 @@ pragma solidity 0.8.35;
 
 // Safe
 import {ISafe, Enum} from "@safe-global/safe-smart-account/interfaces/ISafe.sol";
-// OpenZeppelin
-import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 // Lockdown
 import {Lockdown} from "./Lockdown.sol";
 import {Timelock} from "./base/Timelock.sol";
@@ -45,7 +43,6 @@ import {LockdownLib} from "./utils/LockdownLib.sol";
 /// @custom:security-contact contact@runtime.capital
 contract LockdownTimelock is Lockdown, Timelock {
     using LockdownLib for bytes32;
-    using TransientSlot for *;
 
     // -------------------------------------------------------------------
     // Errors
@@ -57,13 +54,6 @@ contract LockdownTimelock is Lockdown, Timelock {
     ///         quorum could drain via `gasToken`/`refundReceiver` while
     ///         sidestepping the timelock (review C1).
     error TimelockBypassRefundDenied();
-    /// @notice Thrown by `checkModuleTransaction` when the timelock branch
-    ///         detects that another module-path timelocked execution is
-    ///         already in-flight on this Safe (`_inFlightModuleTicket(safe).tload() != 0`).
-    ///         Closes the V1 review round 3 reentrancy window where Safe
-    ///         v1.5.0 module-path reentrancy could double-spend a single
-    ///         scheduled ticket (INV-TIME-11).
-    error ReentrantModuleTimelockExecution();
     error TimelockExceedsLockdownDuration();
 
     // -------------------------------------------------------------------
@@ -304,62 +294,55 @@ contract LockdownTimelock is Lockdown, Timelock {
         bytes calldata data,
         Enum.Operation operation,
         address module
-    ) public virtual override returns (bytes32 moduleTxHash) {
-        bytes32 result = super.checkModuleTransaction(to, value, data, operation, module);
+    ) public virtual override returns (bytes32) {
+        bytes32 moduleTxHash = super.checkModuleTransaction(to, value, data, operation, module);
 
         (State state,) = getState(msg.sender);
-        if (state == State.Normal && getTimelockDelay(msg.sender) > 0) {
-            // Store in transient storage so the post-hook can cross-check and consume it if the module call succeeded.
-            TransientSlot.Bytes32Slot inFlightTicket = _inFlightModuleTicket(msg.sender);
-            require(inFlightTicket.tload() == bytes32(0), ReentrantModuleTimelockExecution());
-            bytes32 ticketKey =
-                getModuleTransactionHash(msg.sender, module, to, value, data, operation).moduleTicketKey();
-            _verifyTicket(msg.sender, ticketKey);
-            inFlightTicket.tstore(ticketKey);
+        if (state == State.Normal) {
+            bytes32 ticketKey = moduleTxHash.moduleTicketKey();
+
+            // When the timelock is active, the module tx must match an executable ticket.
+            if (getTimelockDelay(msg.sender) > 0) {
+                _verifyTicket(msg.sender, ticketKey);
+            }
+
+            // Consume the matching ticket (if any) before execution. Consuming it here, rather than after execution,
+            // means a nested re-execution of the same module tx finds no ticket (INV-TIME-11). It is also done while
+            // the timelock is disabled, so a ticket scheduled earlier cannot be replayed without a wait once the
+            // timelock is re-enabled. A failed module call gets its ticket back in `checkAfterModuleExecution`.
+            _consumeTicket(msg.sender, ticketKey);
         }
 
-        return result;
+        return moduleTxHash;
     }
 
-    /// @notice Post-hook for module-path tx execution. Reads the in-flight
-    ///         ticket key set by the pre-hook (V1 review round 3 INV-TIME-11
-    ///         reentrancy guard) and consumes it if and only if:
-    ///         (a) `success == true` (module call did not revert), AND
-    ///         (b) a ticket exists for this Safe at the in-flight key.
-    ///
-    ///         The in-flight slot is cleared regardless of `success` so the
-    ///         next module-path timelocked tx can begin. A failure path
+    /// @notice Post-hook for module-path tx execution. The pre-hook already
+    ///         consumed the ticket; if the module call failed
     ///         (`success == false`, i.e. Safe v1.5.0 emitted
-    ///         `ExecutionFromModuleFailure`) leaves the ticket in storage
-    ///         so the operator can retry the SAME module tx (identical
-    ///         params) without re-scheduling. The single-use INV-TIME-4
-    ///         semantic is preserved: exactly one successful execution per
-    ///         scheduled ticket.
-    /// @dev    `txHash` is the value our pre-hook returned and Safe v1.5.0
-    ///         relays it back here verbatim. We DO NOT use `txHash` for the
-    ///         storage key (the in-flight slot is authoritative); the
-    ///         parameter is kept for the Safe v1.5.0 interface contract.
-    ///         Cross-Safe damage is bounded by the `msg.sender` binding:
-    ///         a non-Safe caller (or a Safe with no in-flight tx) hits
-    ///         `pending == 0` and returns early.
-    function checkAfterModuleExecution(
-        bytes32,
-        /* txHash */
-        bool success
-    )
-        public
-        virtual
-        override
-    {
-        TransientSlot.Bytes32Slot inFlightTicket = _inFlightModuleTicket(msg.sender);
-        bytes32 pending = inFlightTicket.tload();
-        inFlightTicket.tstore(0); // cleanup
-
-        // Defence in depth against Safe v1.5.0 quirks: still guard against
-        // a missing ticket entry (would otherwise emit a spurious
-        // TimelockConsumed for an already-cleared entry).
-        if (success && pending != bytes32(0)) {
-            _consumeTicket(msg.sender, pending);
+    ///         `ExecutionFromModuleFailure`) while the timelock is active,
+    ///         the ticket is re-created so the operator can retry the SAME
+    ///         module tx (identical params) without re-scheduling
+    ///         (INV-TIME-4). The single-use semantic is preserved: exactly
+    ///         one successful execution per scheduled ticket.
+    ///
+    ///         The re-created ticket has `executableAt = block.timestamp`.
+    ///         While `timelockDelay > 0` the pre-hook verified that the
+    ///         ticket was executable, so this never shortens the wait; it
+    ///         does restart the `TICKET_TTL` window. While the timelock is
+    ///         disabled, the pre-hook did not verify the ticket (it may not
+    ///         have been executable yet, or already expired), so a failed
+    ///         call does not restore it.
+    /// @dev    `moduleTxHash` is the module tx hash our pre-hook returned,
+    ///         which Safe v1.5.0 relays back here verbatim. A failure leaves
+    ///         `timelockDelay` unchanged between the two hooks, since the
+    ///         failed inner call is reverted. This hook can create a ticket
+    ///         from an arbitrary hash, so it must only be reachable through
+    ///         Safe's own module execution: a Safe calling it as the `to` of
+    ///         a transaction is denied by `GuardHookSelfCallDenied`. Any other
+    ///         caller only writes to its own `_timelockConfigs` entry.
+    function checkAfterModuleExecution(bytes32 moduleTxHash, bool success) public virtual override {
+        if (!success && getTimelockDelay(msg.sender) > 0) {
+            _restoreTicket(msg.sender, moduleTxHash.moduleTicketKey());
         }
     }
 }

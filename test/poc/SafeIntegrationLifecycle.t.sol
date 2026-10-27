@@ -79,7 +79,9 @@ abstract contract LifecycleBase is TestEnvironment {
             target.eip712Domain();
         bytes32 digest = MessageHashUtils.toTypedDataHash(
             MessageHashUtils.toDomainSeparator(fields, name, version, chainId, verifying, salt),
-            keccak256(abi.encode(target.LOCKDOWN_TYPEHASH(), safe, reasonHash))
+            keccak256(
+                abi.encode(target.LOCKDOWN_TYPEHASH(), safe, keccak256(abi.encodePacked(vm.addr(pk))), reasonHash)
+            )
         );
         (uint8 v, bytes32 r, bytes32 sv) = vm.sign(pk, digest);
         return abi.encodePacked(r, sv, v);
@@ -844,6 +846,8 @@ contract SafeHookOrderingLifecyclePoC is LifecycleBase {
     /// 2-of-2 Safe: freeze, ERC-1271 freeze, then a 2-of-2 recovery `swapOwner`.
     function test_confirmed_thresholdTwoSafeLockdownRecoveryAndErc1271() public {
         Safe safe = _create2of2(160);
+        // Opt in to ERC-1271 (SPEC_V1 H.27; disabled by default) with a 2-of-2 self-call.
+        _exec2(safe, address(guard), abi.encodeCall(Lockdown.setErc1271Allowed, (true)), Enum.Operation.Call);
 
         bytes32 hash = keccak256("order");
         assertTrue(
@@ -889,6 +893,9 @@ contract SafeHookOrderingLifecyclePoC is LifecycleBase {
     function test_refuted_crossSafeIsolationForSharedSingletonAndHandler() public {
         Safe a = _createConfigureAndInitialise(170);
         Safe b = _createConfigureAndInitialise(171);
+        // Both opt in to ERC-1271 (SPEC_V1 H.27) so the freeze is the only difference.
+        _allowErc1271(a);
+        _allowErc1271(b);
 
         _triggerLockdown(a, keccak256("wrench"));
 

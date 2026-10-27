@@ -2,7 +2,7 @@
 
 Status: living document, pre-production.
 
-Last updated: 2026-07-17.
+Last updated: 2026-08-27.
 
 ## Purpose
 
@@ -23,6 +23,7 @@ Canonical sources:
 - `docs/V1_NON_GOALS.md` - explicitly rejected V1 features.
 - `docs/PRIOR_ART_SAFERSAFES.md` - comparison with Optimism SaferSafes and
   adopted / rejected lessons.
+- `docs/daybreak/RESULTS.md` - focused three-worker adversarial campaign, executable evidence, lead triage, and final dispositions.
 
 ## Current Status
 
@@ -106,6 +107,7 @@ Operators need rehearsed procedures for:
 
 - install and verification;
 - signer enrolment / rotation / removal;
+- independent panic-identity failure domains, including the prohibition on a Lockdown-protected ERC-1271 Safe as the sole identity of another Safe;
 - timelock schedule-and-execute flow;
 - bypasser approval flow, if configured;
 - NEVER_BYPASS admin/disarm policy in the off-chain reviewer;
@@ -119,10 +121,8 @@ Operators need rehearsed procedures for:
 
 ## Next High-ROI Assurance Steps
 
-1. Run a focused AI adversarial campaign and only keep findings reducible to
-   executable Foundry / Echidna / Medusa sequences.
-2. Have a senior reviewer triage those reproducible findings.
-3. Use this assurance index plus `AUDIT_BRIEF.md` to request a Safe Foundation
+1. Preserve and periodically rerun the completed Daybreak campaign's executable Foundry evidence; its lead-reviewed dispositions are in `docs/daybreak/RESULTS.md`.
+2. Use this assurance index plus `AUDIT_BRIEF.md` to request a Safe Foundation
    audit/security grant.
-4. Pursue audit subsidies and co-funding in parallel.
-5. Open a capped disclosure / bounty program once the target commit is stable.
+3. Pursue audit subsidies and co-funding in parallel.
+4. Open a capped disclosure / bounty program once the target commit is stable.

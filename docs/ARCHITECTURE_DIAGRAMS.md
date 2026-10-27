@@ -120,7 +120,7 @@ flowchart LR
     %% Panic identities
     subgraph PANIC["Lockdown signers: 1-of-N panic identities"]
         SID["Registered bytes signer identities per Safe (EnumerableSet.BytesSet)"]
-        EIP712["EIP-712 Lockdown(safe, reasonHash)"]
+        EIP712["EIP-712 Lockdown(safe, signer, reasonHash)"]
         LSECDSA["20-byte EOA / ERC-1271 lockdown signer"]
         LSPWD["Password commitment signer (verifier||key)"]
         LSWA["WebAuthn passkey signer (verifier||key)"]
@@ -142,7 +142,7 @@ flowchart LR
         V2["PasswordVerifier (verifier||key)"]
         V1["WebAuthnVerifier (verifier||key)"]
         PREFLIGHT["off-chain key-shape preflight"]
-        TESTSIG["testSigner drill: verify without burning a signer"]
+        TESTSIG["off-chain drill (DrillSigner script / UI local check): verify without burning or broadcasting"]
         VMAGIC["ERC-7913 verify returns magic 0x024ad318"]
     end
 

@@ -14,6 +14,9 @@ import {
     MockSelectiveMagicVerifier
 } from "../mocks/MockAdversarialVerifiers.sol";
 
+/// @dev Safe v1.5.0 `FallbackManager` storage slot read by `initialize`.
+uint256 constant FALLBACK_HANDLER_STORAGE_SLOT = 0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5;
+
 /// @title OtherSafe - represents SAFE_B in cross-key isolation tests.
 /// @notice Initialised once via `init()`, called by the harness right after
 ///         deployment. The fuzzer has no entry point that locks down SAFE_B,
@@ -27,6 +30,20 @@ contract OtherSafe {
     ///      recovery-owner validation. This harness Safe has no owners.
     function isOwner(address) external pure returns (bool) {
         return false;
+    }
+
+    /// @dev `initialize` reads the Safe's guard, module-guard and fallback-handler
+    ///      slots through `getStorageAt` and requires the singleton in the first two
+    ///      and a handler whose `LOCKDOWN()` is the singleton in the third. This
+    ///      harness Safe reports the singleton for the guard slots and itself as
+    ///      the fallback handler (see `LOCKDOWN`).
+    function getStorageAt(uint256 offset, uint256) external view returns (bytes memory) {
+        if (offset == FALLBACK_HANDLER_STORAGE_SLOT) return abi.encode(address(this));
+        return abi.encode(address(_guard));
+    }
+
+    function LOCKDOWN() external view returns (address) {
+        return address(_guard);
     }
 
     constructor(LockdownTimelock g, MockSecretVerifier secret) {
@@ -67,6 +84,20 @@ contract EchidnaLockdown is Test {
         return false;
     }
 
+    /// @dev `initialize` reads the Safe's guard, module-guard and fallback-handler
+    ///      slots through `getStorageAt` and requires the singleton in the first two
+    ///      and a handler whose `LOCKDOWN()` is the singleton in the third. This
+    ///      harness Safe reports the singleton for the guard slots and itself as
+    ///      the fallback handler (see `LOCKDOWN`).
+    function getStorageAt(uint256 offset, uint256) external view returns (bytes memory) {
+        if (offset == FALLBACK_HANDLER_STORAGE_SLOT) return abi.encode(address(this));
+        return abi.encode(address(guard));
+    }
+
+    function LOCKDOWN() external view returns (address) {
+        return address(guard);
+    }
+
     LockdownTimelock public guard;
     MockSecretVerifier public secretVerifier;
     MockSelectiveMagicVerifier public selectiveMagicVerifier;
@@ -75,6 +106,9 @@ contract EchidnaLockdown is Test {
     OtherSafe public safeB;
 
     address private constant MULTI_SEND_CALL_ONLY = address(0xA83C);
+    /// @dev Fixed module call driven by the INV-TIME-4 single-use actions.
+    address private constant FIXED_MODULE = address(0x80D1);
+    address private constant FIXED_TO = address(0xF1F1);
 
     bytes private constant HARNESS_PASSWORD = "harness-secret";
     bytes32 private immutable HARNESS_COMMITMENT;
@@ -90,6 +124,7 @@ contract EchidnaLockdown is Test {
     bool private _saw_bypass_succeeded_during_incident;
     bool private _saw_sweep_left_owner_ticket_slot_nonzero;
     bool private _saw_unscheduled_disarm_passed;
+    bool private _saw_module_ticket_survived_success;
 
     bool private _initDone;
 
@@ -414,6 +449,41 @@ contract EchidnaLockdown is Test {
         } catch {}
     }
 
+    /// @notice INV-TIME-4 / NM-1060 6.6: schedule one fixed module call, arming
+    ///         a 1 h timelock first if none is set (scheduling needs a delay).
+    function fuzzScheduleFixedModuleTx() public {
+        _ensureInit();
+        if (guard.getTimelockDelay(address(this)) == 0) {
+            try guard.setTimelockDelay(uint64(1 hours)) {} catch {}
+        }
+        try guard.scheduleModuleTransaction(FIXED_MODULE, FIXED_TO, 0, "", Enum.Operation.Call) {} catch {}
+    }
+
+    /// @notice `fuzzSetTimelockDelay` never reaches 0; this drives the
+    ///         `N -> 0` disable so the zero-delay module path is explored.
+    function fuzzDisableTimelock() public {
+        _ensureInit();
+        try guard.setTimelockDelay(0) {} catch {}
+    }
+
+    /// @notice Execute the fixed module call as one Safe v1.5.0 module frame
+    ///         (pre-hook, then post-hook with the relayed hash). A successful
+    ///         execution MUST leave no ticket behind, at any delay; otherwise
+    ///         the same ticket could back a second execution later.
+    function fuzzExecFixedModuleTx(bool success) public {
+        _ensureInit();
+        bytes32 h;
+        try guard.checkModuleTransaction(FIXED_TO, 0, "", Enum.Operation.Call, FIXED_MODULE) returns (bytes32 r) {
+            h = r;
+        } catch {
+            return;
+        }
+        guard.checkAfterModuleExecution(h, success);
+        if (success && guard.getModuleTransactionExecutableAt(address(this), h) != 0) {
+            _saw_module_ticket_survived_success = true;
+        }
+    }
+
     /// @notice INV-LIVE-1 (§14.2) regression tripwire. In Normal mode with
     ///         timelockDelay > 0, every owner-path op that NEUTRALISES
     ///         protection (setGuard(0), removeLockdownSigner,
@@ -550,6 +620,13 @@ contract EchidnaLockdown is Test {
         (uint64 dur,,,,) = guard.getConfigSnapshot(address(this));
         if (dur == 0) return true; // uninitialised
         return dur >= guard.getTimelockDelay(address(this));
+    }
+
+    /// @notice INV-TIME-4 (NM-1060 6.6): no module ticket allows two successful
+    ///         executions. Every successful execution of a scheduled module call
+    ///         burns its ticket, including at `timelockDelay == 0`.
+    function echidna_moduleTicketSingleUse() public view returns (bool) {
+        return !_saw_module_ticket_survived_success;
     }
 
     function _eoaSigner(address signer) private pure returns (bytes memory) {

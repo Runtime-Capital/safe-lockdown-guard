@@ -20,11 +20,12 @@
   },
   "display": {
     "formats": {
-      "Lockdown(address safe,bytes32 reasonHash)": {
+      "Lockdown(address safe,bytes signer,bytes32 reasonHash)": {
         "intent": "Authorize Safe lockdown",
         "interpolatedIntent": "Lock down Safe {safe}",
         "fields": [
           { "path": "#.safe", "label": "Safe to lock down", "format": "addressName", "params": { "types": ["wallet", "contract"], "sources": ["local", "ens"] } },
+          { "path": "#.signer", "label": "Panic signer identity", "format": "raw" },
           { "path": "#.reasonHash", "label": "Incident reason hash", "format": "raw" }
         ]
       }

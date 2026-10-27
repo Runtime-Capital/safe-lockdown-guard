@@ -5,11 +5,13 @@ import {ISafe, Enum} from "@safe-global/safe-smart-account/interfaces/ISafe.sol"
 import {ISignatureValidator} from "@safe-global/safe-smart-account/interfaces/ISignatureValidator.sol";
 import {TokenCallbackHandler} from "@safe-global/safe-smart-account/handler/TokenCallbackHandler.sol";
 import {StateMachine} from "../base/StateMachine.sol";
+import {Erc1271Policy} from "../base/Erc1271Policy.sol";
 
 /// @title Lockdown Fallback Handler
-/// @notice A drop-in replacement for Safe's `CompatibilityFallbackHandler` that
-///         additionally freezes the Safe's ERC-1271 signature surface while the
-///         Safe is under an active lockdown incident.
+/// @notice A replacement for Safe's `CompatibilityFallbackHandler` whose
+///         ERC-1271 signature surface is disabled unless the Safe opted in on
+///         the Lockdown singleton, and frozen while the Safe is under an active
+///         lockdown incident.
 /// @dev ⚠️ This contract is only intended for being used as a fallback handler
 ///      for a {Safe}. Using it in other ways may cause undefined behavior. ⚠️
 ///
@@ -26,10 +28,22 @@ import {StateMachine} from "../base/StateMachine.sol";
 ///      outstanding signatures. Operators must still minimise standing approvals
 ///      and open orders.
 ///
+///      Opt-in gate (SPEC_V1 H.27, NM-1060 6.1): outside an incident,
+///      ERC-1271 validates only if the Safe set `setErc1271Allowed(true)` on the
+///      singleton (an owner-path, timelocked config call). The default is
+///      disabled, also for uninitialised Safes, so this handler is not a neutral
+///      drop-in on a Safe that never opted in. An off-chain signature (permit,
+///      EIP-3009 `transferWithAuthorization`, Permit2, CoW, Seaport, ...) is
+///      settled by a third party without any `execTransaction`, so the timelock
+///      can never give it a reaction window. The gate covers both the inline
+///      `checkSignatures` branch and the `signedMessages` branch (entries
+///      written before the Lockdown install are permanent in Safe).
+///
 ///      This file is a verbatim copy of Safe v1.5.0
-///      `contracts/handler/CompatibilityFallbackHandler.sol` (LGPL-3.0) with a
-///      single addition: the lockdown gate at the top of `isValidSignature`.
-///      Diffing against the canonical handler should show exactly that gate.
+///      `contracts/handler/CompatibilityFallbackHandler.sol` (LGPL-3.0) with
+///      two additions, both at the top of `isValidSignature`: the lockdown
+///      gate and the opt-in gate (plus their two errors). Diffing against the
+///      canonical handler should show exactly that.
 /// @custom:security-contact contact@runtime.capital
 contract LockdownFallbackHandler is TokenCallbackHandler, ISignatureValidator {
     /// @notice The Lockdown singleton this handler reads incident state from.
@@ -41,6 +55,10 @@ contract LockdownFallbackHandler is TokenCallbackHandler, ISignatureValidator {
     /// @notice ERC-1271 validation is frozen while the Safe is under an active
     ///         lockdown incident (LockedDown / Recovering).
     error SignaturesFrozenDuringLockdown();
+
+    /// @notice ERC-1271 validation is disabled for this Safe: it has not opted
+    ///         in via `setErc1271Allowed(true)` on the singleton (SPEC_V1 H.27).
+    error Erc1271Disabled();
 
     /**
      * @dev The precomputed EIP-712 type hash for the Safe message type.
@@ -99,7 +117,8 @@ contract LockdownFallbackHandler is TokenCallbackHandler, ISignatureValidator {
     /**
      * @notice Implementation of the EIP-1271 signature validation method.
      * @dev This implementation verifies signatures for a `ISafe(msg.sender)`,
-     *      refusing validation while that Safe is under an active lockdown.
+     *      refusing validation while that Safe is under an active lockdown
+     *      or has not opted in to ERC-1271 on the Lockdown singleton.
      * @param _dataHash Hash of the data signed.
      * @param _signature Signature data.
      * @return The EIP-1271 magic value if the signature is valid, reverts otherwise.
@@ -107,18 +126,22 @@ contract LockdownFallbackHandler is TokenCallbackHandler, ISignatureValidator {
     function isValidSignature(bytes32 _dataHash, bytes calldata _signature) public view override returns (bytes4) {
         // Caller should be a Safe.
         ISafe safe = ISafe(payable(msg.sender));
-        // --- Lockdown gate (the only addition vs CompatibilityFallbackHandler) ---
+        // --- Lockdown gate (addition vs CompatibilityFallbackHandler) ---
         // While this Safe is under an active incident, refuse ERC-1271 so an
         // off-chain signature cannot be used to drain the frozen Safe through a
-        // third-party settlement that never calls execTransaction. An
-        // uninitialised config (no Lockdown installed) passes through, so the
-        // handler is a safe drop-in even on Safes that do not use the guard.
+        // third-party settlement that never calls execTransaction. This holds
+        // regardless of the opt-in below.
         (StateMachine.State state,) = LOCKDOWN.getState(address(safe));
         require(
             state == StateMachine.State.Normal || state == StateMachine.State.Uninitialised,
             SignaturesFrozenDuringLockdown()
         );
-        // --- end addition ---
+        // --- Opt-in gate (addition, SPEC_V1 H.27, NM-1060 6.1) ---
+        // ERC-1271 is an explicit per-Safe operator choice, disabled by default
+        // (an uninitialised Safe reads `false` too). Runs before both branches
+        // below, so pre-install `signedMessages` entries are gated as well.
+        require(Erc1271Policy(address(LOCKDOWN)).isErc1271Allowed(address(safe)), Erc1271Disabled());
+        // --- end additions ---
         bytes memory messageData = encodeMessageDataForSafe(safe, abi.encode(_dataHash));
         bytes32 messageHash = keccak256(messageData);
         if (_signature.length == 0) {

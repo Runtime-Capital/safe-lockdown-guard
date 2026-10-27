@@ -20,7 +20,7 @@ import {WebAuthnVerifier, WebAuthnVerifierNoUV} from "../src/verifiers/WebAuthnV
 ///         minimum, a maximum observed, and the margin those imply.
 ///
 /// @dev Deliberately a `forge script`, not a test. A test file would change the
-///      483-test count that the audit brief, the scope sheet and the RFQ answers
+///      556-test count that the audit brief, the scope sheet and the RFQ answers
 ///      all state, forcing a documentation round-trip for a measurement harness.
 ///      Nothing under `src/` is modified.
 ///
@@ -142,7 +142,7 @@ contract WebAuthnGasEnvelope is TestEnvironment {
         vm.prank(address(safe));
         guard.addLockdownSigner(signer);
 
-        bytes32 digest = _triggerDigest(safe, REASON);
+        bytes32 digest = _triggerDigest(safe, signer, REASON);
         bytes memory sig = _assertion(digest, flags);
 
         // A real trigger transaction begins with both addresses cold. The
@@ -164,9 +164,9 @@ contract WebAuthnGasEnvelope is TestEnvironment {
     }
 
     /// @dev The EIP-712 digest `triggerLockdown` will check, so the WebAuthn
-    ///      challenge is bound to the real `(safe, reasonHash)` rather than to a
+    ///      challenge is bound to the real `(safe, signer, reasonHash)` rather than to a
     ///      fixed test challenge.
-    function _triggerDigest(Safe safe, bytes32 reasonHash) internal view returns (bytes32) {
+    function _triggerDigest(Safe safe, bytes memory signer, bytes32 reasonHash) internal view returns (bytes32) {
         (, string memory name, string memory version, uint256 chainId, address verifying, bytes32 salt,) =
             guard.eip712Domain();
         bytes32 domainSeparator = keccak256(
@@ -181,7 +181,9 @@ contract WebAuthnGasEnvelope is TestEnvironment {
         salt; // unused in this domain shape
         return keccak256(
             abi.encodePacked(
-                hex"1901", domainSeparator, keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, reasonHash))
+                hex"1901",
+                domainSeparator,
+                keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, keccak256(signer), reasonHash))
             )
         );
     }

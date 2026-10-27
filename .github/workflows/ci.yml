@@ -11,7 +11,7 @@ env:
 jobs:
   test:
     name: Forge test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -46,6 +46,9 @@ jobs:
           FOUNDRY_PROFILE: coverage
         run: forge coverage --ir-minimum
 
+  # Stays on a GitHub-hosted runner: `playwright install --with-deps` runs
+  # apt-get (needs sudo) and the browser smoke uses the system Chrome channel,
+  # neither of which the sudo-less self-hosted pool provides.
   operator-artifacts:
     name: Operator artifacts
     runs-on: ubuntu-latest
@@ -78,7 +81,7 @@ jobs:
   gas-diff:
     name: Gas diff
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-general]
     permissions:
       contents: read
     steps:

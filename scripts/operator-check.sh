@@ -19,6 +19,7 @@ fi
 
 bash -n scripts/preflight-install-v1.sh
 bash -n scripts/verify-install-v1.sh
+bash -n scripts/operator-e2e-anvil.sh
 bash -n scripts/gen-manifest-codehashes.sh
 bash -n scripts/package-audit.sh
 echo "[OK] operator shell scripts parse"

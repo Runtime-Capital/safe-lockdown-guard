@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
 /// @custom:security-contact contact@runtime.capital
 abstract contract StateMachine {
     /// @notice Smallest `lockdownDuration`. Two roles: (1) anti-fat-finger
@@ -14,7 +16,7 @@ abstract contract StateMachine {
     uint64 public constant RESUME_DELAY_MIN = 4 hours;
     uint64 public constant RESUME_DELAY_MAX = 7 days;
 
-    bytes32 public constant LOCKDOWN_TYPEHASH = keccak256("Lockdown(address safe,bytes32 reasonHash)");
+    bytes32 public constant LOCKDOWN_TYPEHASH = keccak256("Lockdown(address safe,bytes signer,bytes32 reasonHash)");
 
     enum State {
         Uninitialised,
@@ -188,7 +190,8 @@ abstract contract StateMachine {
     }
 
     function _lock(address safe, bytes32 reasonHash, bytes memory signer) internal virtual {
-        uint64 until = uint64(block.timestamp) + _configs[safe].lockdownDuration;
+        uint64 until =
+            uint64(Math.max(uint64(block.timestamp), _configs[safe].lockdownUntil)) + _configs[safe].lockdownDuration;
         _configs[safe].lockdownUntil = until;
         _configs[safe].lockdownReasonHash = reasonHash;
         emit SafeLockedDown(safe, until, reasonHash, signer);

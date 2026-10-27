@@ -4,8 +4,8 @@ These are pre-deployment ERC-7730 v2 templates for the v1.0.0 Solidity ABI:
 
 - `calldata-safe-lockdown-1.json` describes direct calls to the
   `LockdownTimelock` singleton.
-- `eip712-lockdown-1.json` describes the `Lockdown(address safe,bytes32
-  reasonHash)` panic authorization.
+- `eip712-lockdown-1.json` describes the `Lockdown(address safe,bytes signer,
+  bytes32 reasonHash)` panic authorization.
 
 Both templates deliberately contain an empty `deployments` array. They pass the
 published ERC-7730 v2 JSON schema but the official `erc7730 lint` command

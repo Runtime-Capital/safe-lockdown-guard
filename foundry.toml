@@ -10,14 +10,6 @@ optimizer = true
 optimizer_runs = 200
 via_ir = true
 fs_permissions = []
-# The module-timelock hook tests model a single Safe transaction whose pre-hook
-# (checkModuleTransaction) and post-hook (checkAfterModuleExecution) share the
-# in-flight ticket via transient storage (EIP-1153). Foundry >=1.7 defaults
-# `isolate` to true, which runs each top-level test call as its own transaction
-# and so clears transient storage between the pre- and post-hook, breaking that
-# flow. Keep non-isolate mode so the sequenced hook calls stay in one tx, as
-# they are in production (Safe's execTransactionFromModule).
-isolate = false
 
 [lint]
 exclude_lints = ["block-timestamp", "incorrect-shift", "unsafe-typecast"]

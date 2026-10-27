@@ -125,6 +125,41 @@ Review guidance: a finding that says "the hook admits malformed calldata that
 the callee then reverts" is informational unless it consumes nonce/value in a
 way that changes the threat model.
 
+### Per-Safe Ticket Epoch Bumped on Trigger
+
+Rejected for now on review of NM-1060 6.5.
+
+A per-Safe epoch folded into every ticket key and incremented inside
+`triggerLockdown` (one SSTORE) would invalidate every owner and module ticket
+scheduled before the incident. It would close the residual that a pre-incident
+module ticket survives nonce burns and owner swaps and fires at the first
+second of Normal (AR-19).
+
+Reasons:
+
+- It also kills every legitimate ticket. A defensive queue that took up to 30
+  days to mature must be rescheduled and waited again after every incident,
+  drill or false positive, which is itself a liveness cost a single panic
+  identity can impose.
+- `disableModule` is already recovery-whitelisted and makes a pending module
+  ticket unreachable; owner tickets are already handled by nonce burns. The
+  residual is contained operationally (AR-19, D-18).
+- It changes every ticket-key derivation on frozen Solidity, the same
+  objection that deferred the uninstall ticket epoch
+  (`docs/PRIOR_ART_SAFERSAFES.md` §6).
+
+### Generic Forwarding Fallback Handler
+
+Rejected during compatibility review (`docs/COMPATIBILITY.md`).
+
+A `LockdownFallbackHandler` that forwards unknown selectors to a second
+handler would let Lockdown coexist with `Safe4337Module`, `Safe7579` or
+`ExtensibleFallbackHandler`. Handlers identify the Safe through `msg.sender`,
+so a `CALL` relay presents the wrong account, and a `DELEGATECALL` relay runs
+the second handler in storage shared by every Safe bound to the same handler
+instance. A dedicated `LockdownExtensibleFallbackHandler` fork is the possible
+future path.
+
 ## Principle
 
 V1 is intentionally narrow: install completeness, owner-path lockdown,

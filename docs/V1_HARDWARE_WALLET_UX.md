@@ -198,7 +198,8 @@ display priorities (in order):
 
 `SafeDormant` event fires if `initialSigners.length == 0`. The
 post-install verification script
-(`scripts/verify-install-v1.sh`) flags this.
+(`scripts/verify-install-v1.sh`) FAILs on it unless `--allow-dormant` is
+passed (for the intermediate check of a staged install only).
 
 ## 4. Stress drill checklist (for Safe owners)
 
@@ -211,8 +212,8 @@ Run this drill quarterly:
    - `keccak256(signer)` matching what the indexer computes
    - `signersCount` incremented by one in the post-tx snapshot
 2. From the panic signer device (separate device), produce an EIP-712
-   signature for `Lockdown(safe, reasonHash)`. Confirm device shows the
-   EIP-712 fields cleanly.
+   signature for `Lockdown(safe, signer, reasonHash)`. Confirm device shows the
+   EIP-712 fields cleanly, including the `signer` identity bytes.
 3. Broadcast `triggerLockdown` via a relayer (test-only Safe, NOT the
    production Safe). Confirm `SafeLockedDown` event carries the
    expected `reasonHash` and `signer`.

@@ -31,6 +31,9 @@ contract Erc1271IncidentSignaturePoC is TestEnvironment {
     function setUp() public override {
         super.setUp();
         safe = _createConfigureAndInitialise(101);
+        // These proofs characterise a Safe that OPTED IN to ERC-1271 (SPEC_V1 H.27).
+        // A default Safe refuses every signature here with `Erc1271Disabled`.
+        _allowErc1271(safe);
         orderHash = keccak256("a settlement order with a far-future deadline");
     }
 

@@ -1,7 +1,7 @@
 SHELL := /usr/bin/env bash
 ECHIDNA_IMAGE := trailofbits/echidna@sha256:8546f6705d46aea2cdf8309a251ad0946c7f92b7d3eb0b968fba37e3afbf131c
 
-.PHONY: help hooks format test build contract-sizes webauthn-fixtures embedded-bytecode build-info sourcify-rehearsal coverage slither aderyn semgrep halmos browser-smoke echidna medusa mutation-gambit audit-check audit-check-full package clean
+.PHONY: help hooks format test build operator-check operator-e2e contract-sizes webauthn-fixtures embedded-bytecode build-info sourcify-rehearsal coverage slither aderyn semgrep halmos browser-smoke echidna medusa mutation-gambit audit-check audit-check-full package clean
 
 help:
 	@printf '%s\n' 'safe-lockdown commands:'
@@ -20,6 +20,8 @@ help:
 	@printf '%s\n' '  make semgrep             Run Semgrep registry + Safe guard rules if available'
 	@printf '%s\n' '  make halmos              Run focused Halmos symbolic checks'
 	@printf '%s\n' '  make browser-smoke       Run Playwright smoke test for lockdown-lifecycle.html'
+	@printf '%s\n' '  make operator-check      Validate operator artifacts (JSON, scripts, package, browser smoke)'
+	@printf '%s\n' '  make operator-e2e        Run preflight/verify end to end against real bytecode on anvil'
 	@printf '%s\n' '  make echidna             Run Echidna property tests via Docker'
 	@printf '%s\n' '  make medusa              Run optional Medusa fuzz campaign if installed'
 	@printf '%s\n' '  make mutation-gambit     Run optional targeted Gambit mutation pass'
@@ -107,6 +109,9 @@ audit-check-full: test build build-info contract-sizes sourcify-rehearsal covera
 
 operator-check:
 	scripts/operator-check.sh
+
+operator-e2e:
+	scripts/operator-e2e-anvil.sh
 
 package:
 	scripts/package-audit.sh

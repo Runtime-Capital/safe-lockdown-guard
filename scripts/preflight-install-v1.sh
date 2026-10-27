@@ -15,7 +15,8 @@
 # Usage:
 #   scripts/preflight-install-v1.sh \
 #       --safe 0xSAFE --singleton 0xSINGLETON --rpc https://... \
-#       --fallback-handler 0xHANDLER [--multi-send 0xA83c...]
+#       --fallback-handler 0xHANDLER [--multi-send 0xA83c...] \
+#       [--snapshot-out preinstall-snapshot.json]
 #
 
 set -euo pipefail
@@ -31,6 +32,7 @@ EXPECTED_SAFE_CODEHASH=""
 EXPECTED_FALLBACK_HANDLER_CODEHASH=""
 ALLOW_UNPINNED=0
 MANIFEST=""
+SNAPSHOT_OUT=""
 
 usage() {
     cat <<EOF
@@ -39,6 +41,7 @@ Usage: $0 --safe <addr> --singleton <addr> --rpc <url>
           [--multi-send <addr>] [--multi-send-codehash <hash>]
           [--singleton-codehash <hash>] [--safe-codehash <hash>]
           [--allow-unpinned-codehash] [--manifest deploy/manifest.json]
+          [--snapshot-out <file.json>]
 
 V1 read-only preflight. Required checks:
   - Safe has code and VERSION() == 1.5.0
@@ -54,6 +57,15 @@ V1 read-only preflight. Required checks:
   - LockdownFallbackHandler has code, codehash is pinned, and
     LOCKDOWN() returns the singleton
   - Current Safe fallback-handler slot (warn if present)
+  - Safe masterCopy (proxy slot 0) EXTCODEHASH matches the canonical
+    Safe v1.5.0 singleton (--safe-codehash / manifest safeMasterCopyCodehash)
+  - Prints the Safe's owners, threshold and enabled modules
+
+--snapshot-out <file> writes those owners, threshold and enabled modules
+(read at one block) as JSON, only when every check passed. Hand the file to
+scripts/verify-install-v1.sh --snapshot <file> after the install executes:
+verify then FAILs if the install batch also changed owners, threshold or
+modules (for example a smuggled addOwnerWithThreshold or enableModule).
 
 Multichain note: the singleton and MULTI_SEND_CALL_ONLY are trusted by
 ADDRESS, but an address does not authenticate bytecode. On any chain where
@@ -63,9 +75,11 @@ EXTCODEHASH so this preflight rejects a same-address / different-bytecode
 trust failure before install (see T-DEPLOY-1 / T-DEPLOY-2, SPEC_V1 §14.1).
 
 Secure-by-default: codehash binding is MANDATORY. Omitting
---singleton-codehash, --multi-send-codehash or --fallback-handler-codehash
-FAILS the preflight (a fake singleton can spoof VERSION() and
-supportsInterface(); a fake handler can spoof install completeness). Pass
+--singleton-codehash, --multi-send-codehash, --fallback-handler-codehash or
+--safe-codehash FAILS the preflight (a fake singleton can spoof VERSION() and
+supportsInterface(); a fake handler can spoof install completeness; a
+non-canonical Safe masterCopy can ignore the guard hooks). A manifest
+placeholder (0xFILL...) counts as omitted. Pass
 --allow-unpinned-codehash to consciously downgrade those to warnings for
 dev/test only; do not use it for a production install.
 EOF
@@ -84,6 +98,7 @@ while [[ $# -gt 0 ]]; do
         --fallback-handler-codehash) EXPECTED_FALLBACK_HANDLER_CODEHASH="$2"; shift 2 ;;
         --allow-unpinned-codehash) ALLOW_UNPINNED=1; shift ;;
         --manifest) MANIFEST="$2"; shift 2 ;;
+        --snapshot-out) SNAPSHOT_OUT="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -95,6 +110,10 @@ fi
 
 if ! command -v cast >/dev/null 2>&1; then
     echo "cast not found. Install Foundry." >&2; exit 1
+fi
+
+if [[ -n "$SNAPSHOT_OUT" ]] && ! command -v jq >/dev/null 2>&1; then
+    echo "jq required for --snapshot-out. Install jq." >&2; exit 1
 fi
 
 # Resolve expected codehashes from the manifest (by chainId) when not given
@@ -234,16 +253,16 @@ fi
 # The Safe is authenticated by VERSION() above - the same spoofable surface the
 # singleton codehash pin closes. Pin the Safe's masterCopy (slot 0) too: a
 # non-canonical Safe implementation can ignore the guard hooks entirely while
-# VERSION()/supportsInterface() report canonical. WARN (not FAIL) when
-# unpinned: the Safe is the operator's own wallet, a weaker trust anchor than
-# the shared singleton.
+# VERSION()/supportsInterface() report canonical, and a downgrade to a Safe
+# without IModuleGuard leaves all three Lockdown slots looking correct while
+# the module freeze silently stops existing (AR-20). Same fail-closed gate as
+# the singleton / MultiSend / handler pins: an unpinned masterCopy (no
+# --safe-codehash and a 0xFILL placeholder in the manifest) FAILs unless
+# --allow-unpinned-codehash is set for dev/test.
 safe_master_raw=$(cast storage "$SAFE" 0 --rpc-url "$RPC" 2>/dev/null || true)
 safe_master=$(slot_to_address "${safe_master_raw:-0x0}")
-if [[ -n "$EXPECTED_SAFE_CODEHASH" ]]; then
-    check_codehash_eq "Safe masterCopy EXTCODEHASH" "$safe_master" "$EXPECTED_SAFE_CODEHASH"
-else
-    check_warn "Safe masterCopy EXTCODEHASH" "unpinned (masterCopy=$safe_master; pass --safe-codehash / manifest safeMasterCopyCodehash)"
-fi
+echo "  Safe masterCopy (slot 0): $(lower "$safe_master")"
+check_codehash_pin "Safe masterCopy EXTCODEHASH" "$safe_master" "$EXPECTED_SAFE_CODEHASH" "--safe-codehash"
 
 sing_code=$(cast code "$SINGLETON" --rpc-url "$RPC" 2>/dev/null || true)
 if [[ -z "$sing_code" || "$sing_code" == "0x" ]]; then
@@ -356,8 +375,13 @@ snap=$(cast call "$SINGLETON" \
 if [[ -z "$snap" ]]; then
     check_fail "getConfigSnapshot(safe)" "call failed - check ABI"
 else
-    read -r snap_d snap_r snap_u snap_cnt snap_back \
-        < <(printf '%s\n' "$snap" | tr '\n' ' ' | tr -s ' ')
+    # One value per line; cast may append a "[8.64e4]" annotation to a line,
+    # stripped below with ${var%% *}. (Joining lines and `read`ing them would
+    # both misalign fields on annotations and, at EOF without a newline, make
+    # `read` return 1 and abort the script under `set -e`.)
+    mapfile -t snap_lines < <(printf '%s\n' "$snap")
+    snap_d="${snap_lines[0]:-}"; snap_r="${snap_lines[1]:-}"; snap_u="${snap_lines[2]:-}"
+    snap_cnt="${snap_lines[3]:-}"; snap_back="${snap_lines[4]:-}"
     snap_d_num=${snap_d%% *}
     if [[ "$snap_d_num" =~ ^[0-9]+$ ]] && [[ "$snap_d_num" -eq 0 ]]; then
         check_ok "Safe NOT yet initialised" "lockdownDuration=0"
@@ -365,6 +389,15 @@ else
         check_fail "Safe NOT yet initialised" "lockdownDuration=$snap_d_num (initialize would revert)"
     fi
 fi
+
+# SPEC_V1 H.27: ERC-1271 stays disabled after install unless the batch also
+# carries setErc1271Allowed(true) right after initialize (optional 5th call).
+erc1271=$(cast call "$SINGLETON" "isErc1271Allowed(address)(bool)" "$SAFE" --rpc-url "$RPC" 2>/dev/null || true)
+case "${erc1271%% *}" in
+    false) check_ok "erc1271Allowed" "false (default after install; opt in with setErc1271Allowed(true))" ;;
+    true)  check_warn "erc1271Allowed" "already true for this Safe" ;;
+    *)     check_warn "erc1271Allowed" "call failed (singleton predates H.27?)" ;;
+esac
 
 raw=$(cast storage "$SAFE" "$GUARD_SLOT" --rpc-url "$RPC" 2>/dev/null || true)
 cur_guard=$(slot_to_address "${raw:-0x0}")
@@ -406,20 +439,105 @@ fi
 # (setGuard + setModuleGuard + setFallbackHandler + initialize in one
 # MultiSend, SPEC §8.1).
 SENTINEL_MODULES="0x0000000000000000000000000000000000000001"
-modules_out=$(cast call "$SAFE" \
-    "getModulesPaginated(address,uint256)(address[],address)" \
-    "$SENTINEL_MODULES" 100 --rpc-url "$RPC" 2>/dev/null || true)
-modules_line=$(printf '%s\n' "$modules_out" | head -n1)
-if [[ -z "$modules_line" ]]; then
+ZERO_ADDRESS="0x0000000000000000000000000000000000000000"
+MODULE_PAGE_SIZE=100
+MODULE_MAX_PAGES=50
+
+# Owners / threshold / modules are read at ONE block so the snapshot is
+# internally consistent. Falls back to "latest" if the block number is
+# unreadable (the snapshot is then refused below).
+SNAP_BLOCK=$(cast block-number --rpc-url "$RPC" 2>/dev/null || true)
+[[ "$SNAP_BLOCK" =~ ^[0-9]+$ ]] || SNAP_BLOCK=""
+block_args=()
+[[ -n "$SNAP_BLOCK" ]] && block_args=(--block "$SNAP_BLOCK")
+
+# Prints every enabled module (lowercase, one per line), walking all pages of
+# getModulesPaginated. Returns non-zero if any page cannot be read, so a
+# truncated list is never mistaken for the complete set.
+list_safe_modules() {
+    local start="$SENTINEL_MODULES" out first next page=0
+    while :; do
+        out=$(cast call "$SAFE" "getModulesPaginated(address,uint256)(address[],address)" \
+            "$start" "$MODULE_PAGE_SIZE" "${block_args[@]}" --rpc-url "$RPC" 2>/dev/null) || return 1
+        first=$(printf '%s\n' "$out" | sed -n '1p')
+        next=$(lower "$(printf '%s\n' "$out" | sed -n '2p')")
+        [[ "$first" == \[* ]] || return 1
+        printf '%s\n' "$first" | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' || true
+        if [[ -z "$next" || "$next" == "$SENTINEL_MODULES" || "$next" == "$ZERO_ADDRESS" ]]; then
+            return 0
+        fi
+        page=$((page + 1))
+        [[ "$page" -lt "$MODULE_MAX_PAGES" ]] || return 1
+        start="$next"
+    done
+}
+
+owners_line=$(cast call "$SAFE" "getOwners()(address[])" "${block_args[@]}" --rpc-url "$RPC" 2>/dev/null || true)
+owners=$(printf '%s\n' "$owners_line" | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' || true)
+threshold_raw=$(cast call "$SAFE" "getThreshold()(uint256)" "${block_args[@]}" --rpc-url "$RPC" 2>/dev/null || true)
+threshold=${threshold_raw%% *}
+SNAPSHOT_READ_OK=1
+
+if [[ "$owners_line" == \[* && -n "$owners" ]]; then
+    check_ok "Safe owners" "$(printf '%s\n' "$owners" | wc -l | tr -d ' ') owner(s)"
+    printf '%s\n' "$owners" | while read -r o; do printf '         owner : %s\n' "$o"; done
+else
+    check_warn "Safe owners" "getOwners call failed - check manually"
+    SNAPSHOT_READ_OK=0
+fi
+if [[ "$threshold" =~ ^[0-9]+$ ]] && [[ "$threshold" -gt 0 ]]; then
+    check_ok "Safe threshold" "$threshold"
+else
+    check_warn "Safe threshold" "getThreshold call failed - check manually"
+    SNAPSHOT_READ_OK=0
+fi
+
+# T-INSTALL-1 (SPEC_V1 §14.2): an already-enabled module is the shared
+# precondition of every install/upgrade-gap drain. Until BOTH the module
+# guard slot, fallback-handler slot and an initialised config are in place,
+# an enabled module can
+# drain the module path or call initialize(...) on the singleton with
+# attacker-chosen config (msg.sender == Safe). Enumerate enabled modules so
+# the operator vets each one BEFORE install, and installs atomically
+# (setGuard + setModuleGuard + setFallbackHandler + initialize in one
+# MultiSend, SPEC §8.1).
+if ! modules=$(list_safe_modules); then
     check_warn "Enabled Safe modules" "getModulesPaginated call failed - check manually"
-elif [[ "$modules_line" == "[]" ]]; then
+    SNAPSHOT_READ_OK=0
+    modules=""
+elif [[ -z "$modules" ]]; then
     check_ok "Enabled Safe modules" "none"
 else
-    mod_count=$(printf '%s' "$modules_line" | grep -oE '0x[0-9a-fA-F]{40}' | wc -l | tr -d ' ')
+    mod_count=$(printf '%s\n' "$modules" | wc -l | tr -d ' ')
     check_warn "Enabled Safe modules" "$mod_count enabled - VET each before install (T-INSTALL-1); an enabled module bypasses an unset module guard"
-    printf '%s\n' "$modules_line" | grep -oE '0x[0-9a-fA-F]{40}' | while read -r m; do
-        printf '         module: %s\n' "$(lower "$m")"
+    printf '%s\n' "$modules" | while read -r m; do
+        printf '         module: %s\n' "$m"
     done
+fi
+
+if [[ -n "$SNAPSHOT_OUT" ]]; then
+    if [[ "$SNAPSHOT_READ_OK" -ne 1 || -z "$SNAP_BLOCK" ]]; then
+        check_fail "Owner/module snapshot" "could not read owners, threshold, modules or block number; not written"
+    elif [[ "$FAIL" -ne 0 ]]; then
+        check_fail "Owner/module snapshot" "not written: preflight has failing checks"
+    else
+        snap_chain_id=$(cast chain-id --rpc-url "$RPC" 2>/dev/null || true)
+        to_json_array() { printf '%s\n' "$1" | sed '/^$/d' | jq -R . | jq -s -c .; }
+        if jq -n \
+            --arg format "runtime-capital.safe-lockdown.owner-module-snapshot.v1" \
+            --arg chainId "$snap_chain_id" \
+            --arg safe "$(lower "$SAFE")" \
+            --arg blockNumber "$SNAP_BLOCK" \
+            --arg threshold "$threshold" \
+            --argjson owners "$(to_json_array "$owners")" \
+            --argjson modules "$(to_json_array "$modules")" \
+            '{format: $format, chainId: $chainId, safe: $safe, blockNumber: $blockNumber,
+              owners: $owners, threshold: $threshold, modules: $modules}' > "$SNAPSHOT_OUT"; then
+            check_ok "Owner/module snapshot" "written to $SNAPSHOT_OUT (block $SNAP_BLOCK)"
+        else
+            check_fail "Owner/module snapshot" "could not write $SNAPSHOT_OUT"
+        fi
+    fi
 fi
 
 echo
@@ -431,7 +549,16 @@ if [[ "$FAIL" -eq 0 ]]; then
 	echo "  safe.setFallbackHandler(lockdownFallbackHandler)"
 	echo "  singleton.initialize(duration, delay, recoveryOwners, initialSigners)"
     echo "in a single MultiSend, with initialSigners.length >= 1 so the"
-    echo "Safe is not left in a dormant (no-signer) state."
+    echo "Safe is not left in a dormant (no-signer) state. A staged install"
+    echo "(signers added in a later transaction) is DORMANT until then:"
+    echo "verify-install-v1.sh FAILs it unless --allow-dormant is passed."
+    if [[ -n "$SNAPSHOT_OUT" ]]; then
+        echo "After the install executes, run verify-install-v1.sh --snapshot $SNAPSHOT_OUT"
+        echo "so any owner / threshold / module change in the batch FAILs."
+    else
+        echo "Tip: re-run with --snapshot-out <file> and pass it to"
+        echo "verify-install-v1.sh --snapshot <file> to catch owner/module changes."
+    fi
     exit 0
 fi
 

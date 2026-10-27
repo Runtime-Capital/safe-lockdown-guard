@@ -113,7 +113,8 @@ On any chain you MUST, before `setGuard`:
   Safe's context and can drain it).
 Both checks are wired into `scripts/preflight-install-v1.sh` and
 `scripts/verify-install-v1.sh` via `--singleton-codehash` and
-`--multi-send-codehash`. Distribute the expected hashes in the per-chain
+`--multi-send-codehash` (alongside the equally fail-closed
+`--fallback-handler-codehash` and `--safe-codehash` masterCopy pin). Distribute the expected hashes in the per-chain
 deploy manifest.
 
 **Code**: `Lockdown` / `LockdownTimelock` constructors.
@@ -239,7 +240,7 @@ states is reachable before `initialize`.
 
 ## 2. Normal mode
 
-### 2.1 Vet a candidate signer identity (off-chain preflight + `testSigner`)
+### 2.1 Vet a candidate signer identity (off-chain preflight + off-chain drill)
 
 **Actors**: Safe quorum candidate-vetting a new signer identity (ECDSA,
 WebAuthn, MPC, exotic schemes) before registering it.
@@ -247,22 +248,35 @@ WebAuthn, MPC, exotic schemes) before registering it.
 **Why it matters**: there is no on-chain verifier-approval step and no
 on-chain behavioural smoke test. Verifier trust is attached to each explicit
 `bytes` signer identity at registration time (see 2.2). Pre-use
-vetting is therefore purely off-chain preflight tooling PLUS the on-chain
-`testSigner` view. A quorum considering an identity can fully exercise it
-with real key material and a real signature before registering anything. The
-`testSigner(bytes signer, bytes32 hash, bytes signature) → bool ok` view does
-exactly that without state mutation: it runs the same
-`SignatureChecker.isValidSignatureNow(signer, hash, signature)` dispatch the
-trigger path uses and returns the boolean result instead of reverting. It
-does NOT consume a registered signer and requires no approval
-step. Safe for ECDSA and WebAuthn (signature material is non-secret
-post-production). NOT safe for password / commit-reveal verifiers (would
-leak the secret to the RPC): since `PasswordVerifier` ships as tier-2
-production, the §8.3.9 obligation applies - test it ONLY with a throwaway
-password, never the real one.
+vetting is therefore entirely off-chain: preflight tooling PLUS an
+off-chain drill. There is deliberately no on-chain drill view. A trigger
+signature is a bearer credential (anyone holding it can call
+`triggerLockdown`, and `reasonHash` is caller-chosen, so a "drill"
+signature is as usable as a real one); sending it to an RPC endpoint lets it
+be logged or intercepted. `script/DrillSigner.s.sol` instead reads the
+exact trigger digest from the singleton's `hashLockdownTrigger(safe, signer,
+reasonHash)` view (the same helper `triggerLockdown` hashes with, SPEC_V1
+§H.29; it takes no signature) and runs the same
+`SignatureChecker.isValidSignatureNow(signer, digest, signature)` dispatch
+the trigger path uses, in a local EVM against a fork (`forge script
+script/DrillSigner.s.sol --fork-url "$RPC"`, inputs via environment
+variables). Only public state is fetched from the RPC; the signature never
+leaves the machine and nothing is broadcast. It works for unregistered
+candidates and does NOT consume a registered signer. The lifecycle UI offers
+the same check in the browser for ECDSA and WebAuthn identities. For
+`PasswordVerifier` (tier-2 production, §8.3.9) the drill is simply
+`keccak256(password) == commitment`, checked offline; never send the
+cleartext anywhere before the real trigger.
 
-**Code**: `Lockdown.testSigner`.
-**Tests**: see `test_testSigner_*`.
+**A drill signature is a live trigger** (external audit NM-1060, SPEC_V1
+§H.25): it stays valid until the identity is burnt or removed. Keep it on
+the drilling machine, discard it after the drill, and if it may have leaked
+(shared, logged, pasted into a remote tool) rotate the identity in Normal
+(`rotateLockdownSigner`); the leaked signature then reverts
+`LockdownSigners_Unknown`.
+
+**Code**: `script/DrillSigner.s.sol`, the lifecycle UI's local verification.
+**Tests**: `test_drillScript_*`, `testFuzz_drillScript_*`, `test_hashLockdownTrigger_*`, `DrillSignatureExposure.test_regression_noOnChainDrillView`.
 
 ### 2.2 Register a lockdown signer
 
@@ -276,9 +290,8 @@ verifies. For a `verifier || key` identity the verifier must have code and
 the key is whatever the verifier expects (e.g. 64-byte `qx || qy` P-256
 public key for WebAuthn). H.13 no longer uses an on-chain verifier-specific
 key-shape extension; registration tooling should preflight known verifier
-encodings before submitting Safe calldata, and drills can use
-`testSigner(...)` to prove that the registered identity/signature pair
-verifies.
+encodings before submitting Safe calldata, and the off-chain drill (2.1)
+proves that the registered identity/signature pair verifies.
 
 **Flow**: `addLockdownSigner(bytes signer)`:
 - `onlyNormal` state gate (`InvalidState` unless the Safe is in Normal, which
@@ -297,7 +310,7 @@ verifies.
   `LockdownSignerAdded(safe, signer)`.
 
 **Returns**: nothing. The signer identity is itself the handle; the device
-that holds the panic key signs the EIP-712 `Lockdown(safe, reasonHash)`
+that holds the panic key signs the EIP-712 `Lockdown(safe, signer, reasonHash)`
 message and presents the same `signer` bytes to `triggerLockdown` when the
 day comes.
 
@@ -411,8 +424,10 @@ this call reliable, replay-resistant, and impossible to forge.
 **Flow**:
 
 1. The signer produces an EIP-712 signature over the message
-   `Lockdown(address safe, bytes32 reasonHash)` (typehash
-   `keccak256("Lockdown(address safe,bytes32 reasonHash)")`, no `signerId`).
+   `Lockdown(address safe, bytes signer, bytes32 reasonHash)` (typehash
+   `keccak256("Lockdown(address safe,bytes signer,bytes32 reasonHash)")`).
+   `signer` is the same identity bytes later passed to `triggerLockdown`,
+   so the signature cannot be submitted under a different identity.
    The `reasonHash` is whatever the runbook says (an opaque
    identifier; the semantic "kidnapping" / "drill" / "device lost" lives
    in an off-chain log indexed by `reasonHash`).
@@ -421,21 +436,27 @@ this call reliable, replay-resistant, and impossible to forge.
 3. The singleton (`onlyInitialized(safe)`):
    - reverts `InvalidState` only if `safe` is uninitialised; in LockedDown or
      Recovering, another registered signer may extend/re-lock the incident.
-   - BURN FIRST: `_removeLockdownSigner(safe, signer)` removes the identity
-     from the active set and marks it in `signerBurntPermanently`. If the
-     identity was never registered (or already burnt) this reverts
-     `LockdownSigners_Unknown`. The burn precedes the signature check on purpose;
-     a `BadSignature` revert below rolls the burn back, so the burn only
-     persists on success (INV-SIGN-1).
-   - VERIFY: `SignatureChecker.isValidSignatureNow(signer, digest,
-     signature)` where
-     `digest = _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH,
-     safe, reasonHash)))`. For a `verifier || key` identity this is a
+   - CHECK: `isLockdownSigner(safe, signer)`; an unregistered or already
+     burnt identity reverts `LockdownSigners_Unknown` before any verifier is
+     called.
+   - VERIFY FIRST (SPEC_V1 §5.2, verify-then-burn): `SignatureChecker
+     .isValidSignatureNow(signer, digest, signature)` where `digest =
+     hashLockdownTrigger(safe, signer, reasonHash)`, i.e.
+     `_hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe,
+     keccak256(signer), reasonHash)))` with `LOCKDOWN_TYPEHASH =
+     keccak256("Lockdown(address safe,bytes signer,bytes32 reasonHash)")`
+     (H.23: the signature binds the exact identity; H.29: the view is the
+     single source of the digest). For a `verifier || key` identity this is a
      STATICCALL to `verifier.verify(key, digest, signature)` that must return
      the ERC-7913 magic `0x024ad318`; any other outcome (revert, short
      return, non-magic return) maps to `BadSignature()`. For a 20-byte
-     identity it is ECDSA / ERC-1271.
-   - WRITE: `lockdownUntil = block.timestamp + lockdownDuration`,
+     identity it is ECDSA / ERC-1271. Nothing is burnt on failure.
+   - BURN: `_removeLockdownSigner(safe, signer)` removes the identity from
+     the active set and marks it in `signerBurntPermanently` (INV-SIGN-1,
+     INV-SIGN-7).
+   - WRITE: `lockdownUntil = max(block.timestamp, lockdownUntil) +
+     lockdownDuration` (a re-trigger while LockedDown stacks on the current
+     window, H.24),
      `lastReasonHash = reasonHash`.
    - EMIT `SafeLockedDown(safe, lockdownUntil, reasonHash, signer)` (the
      trailing `signer` bytes are the forensic trail: a watcher who missed
@@ -445,20 +466,31 @@ this call reliable, replay-resistant, and impossible to forge.
 
 **Reentrancy stance**: verification dispatches via STATICCALL (ERC-1271 /
 ERC-7913 paths), so a verifier cannot mutate state during the call. The
-trigger verifies through `testSigner` before any signer mutation, then removes
+trigger verifies the signature inline before any signer mutation, then removes
 and permanently burns the identity before locking. A successful trigger
 persists exactly one burn and a failed verification persists none
 (INV-SIGN-1); any later revert rolls the sequence back atomically.
 
 **Anti-replay**: the burnt identity is recorded permanently in
 `signerBurntPermanently`, so the same identity can never be re-registered and
-its old EIP-712 signature can never be replayed. (The EIP-712 message no
-longer carries a `signerId`; single-use burn of the exact identity is the
-replay defence, INV-SIGN-7.)
+its old EIP-712 signature can never be replayed. (The EIP-712 message carries
+no counter; single-use burn of the exact identity is the replay defence,
+INV-SIGN-7. The `signer` field additionally binds the signature to that one
+identity, so it cannot be replayed under another identity.)
 
-**Code**: `Lockdown.triggerLockdown`.
+**Re-triggering** (SPEC_V1 §H.24): a trigger while the Safe is still
+LockedDown adds a full `lockdownDuration` on top of the current
+`lockdownUntil`; from Recovering or Normal the new window starts from `now`.
+Extending early therefore loses no freeze time. The flip side: every
+trigger counts, so two guardians firing during the same incident freeze the
+Safe for `2 × lockdownDuration` (+ `resumeDelay`). The runbook should name
+one guardian to fire first and have the others extend only on purpose.
+
+**Code**: `Lockdown.triggerLockdown`, `StateMachine._lock`.
 **Tests**: "triggerLockdown" suite + the
-`test_signatureCannotReplayAfterBurnAndReRegister` regression.
+`test_signatureCannotReplayAfterBurnAndReRegister` regression;
+`test_triggerLockdownExtendsWhenAlreadyLockedDown`,
+`test_triggerLockdownStacksInSameBlock`.
 
 ### 3.2 Ordinary verifier failures normalised to BadSignature (L.3)
 
@@ -476,8 +508,8 @@ bytecodes shipped and codehash-pinned by this repository; any abnormal drill
 result condemns the whole identity and requires remove/rotate to a different
 verifier.
 
-**Code**: `Lockdown.testSigner`, used as the verification source of truth by
-`triggerLockdown`, and the trigger's `BadSignature()` branch.
+**Code**: the inline `SignatureChecker.isValidSignatureNow` call in
+`triggerLockdown`, and its `BadSignature()` branch.
 
 ### 3.3 Owner-path is fully blocked in LockedDown
 
@@ -520,6 +552,17 @@ attacker may have collected for that nonce.
 
 **Flow**: owner-path `checkTransaction`, `to == safe`, `value == 0`,
 `data.length == 0`, `operation == CALL`. The hook accepts.
+
+**`to` MUST be the Safe itself, not `address(0)`.** An empty self-call addressed
+to `address(0)` is REFUSED with `RecoveryActive` during an incident, even though
+Safe v1.5.0 aliases `address(0)` to the Safe at execution and the same
+transaction is perfectly valid in Normal mode: the guard reads the literal
+top-level `to`, and the alias rewrite applies only to inner MultiSend leaves.
+Pinned by
+`test/poc/MixBytesCrossAuditLeads.t.sol::test_limitation_recoveryNonceBurnMustTargetTheSafeNotAddressZero`.
+
+**A nonce burn defuses OWNER tickets only.** Module ticket keys contain no nonce,
+so burning nonces does nothing to them. See §4.5b for the module-path defusal.
 
 **Code**: `Lockdown._isRecoveryCall`.
 
@@ -617,8 +660,33 @@ neutralise a module during recovery (before the auto-resume re-enables the
 module path). `disableModule` cannot move value, so it is a safe cleanup
 primitive. The compromised-module threat itself is out of scope: a module is
 never acquired by accident, and a detected rogue module is disabled directly
-in Normal without any lockdown - so this is opportunistic hardening, not a
-load-bearing control.
+in Normal without any lockdown.
+
+**It is also the ONLY incident-time defusal for a pending module ticket, and
+that makes it load-bearing rather than opportunistic (corrected 2026-08-29).**
+AR-19 prescribes a Safe nonce burn as incident defusal; that works for owner
+tickets and does NOTHING for module tickets, whose key
+`moduleTxHash(safe, module, to, value, dataHash, operation)` contains no nonce.
+A module ticket scheduled before the incident survives every nonce burn and
+fires at the exact auto-resume second. `cancelModuleTransaction` is NOT on the
+recovery whitelist, so it is unavailable precisely when it is wanted. Disabling
+the module is what works: a disabled module can no longer call
+`execTransactionFromModule`, so the ticket becomes unreachable before the guard
+is ever consulted.
+
+**Owner swaps do not help either (NM-1060 6.5)**: the key binds no owner set,
+so a ticket scheduled under a coerced quorum survives the recovery
+`swapOwner`. And `disableModule` only makes the ticket unreachable; it does not
+delete it. Re-enabling the same module while the ticket's TTL window is still
+open revives it.
+
+**Operator rule**: during an incident, if any module ticket is pending, disable
+its module. Do not rely on nonce burns or owner swaps for the module path.
+After auto-resume, `cancelModuleTransaction` the ticket (or wait for its TTL)
+before re-enabling the module. A per-Safe ticket epoch that would void all
+pre-incident tickets was considered and rejected for now (D-18). Pinned by
+`test/poc/MixBytesCrossAuditLeads.t.sol::test_confirmed_disableModuleDefusesPendingModuleTicket`
+and its negative counterpart `::test_confirmed_nonceBurnDoesNotDefuseAPendingModuleTicket`.
 
 **Code**: `IModuleManager.disableModule` selector accepted in `_isRecoveryCall`.
 
@@ -722,10 +790,8 @@ For monitoring and incident response without log replay:
   the `SafeLockedDown` event log (the durable record), not this view.
 - `getLockdownUntil(safe) → uint64`: `lockdownUntil` while LockedDown /
   Recovering; normalises to `0` once the recovery window elapses.
-- `testSigner(signer, hash, signature) → bool`:
-  pure signer-identity sanity test without state mutation. Safe to call on
-  candidate identities before registering them (subject to the password-leak
-  caveat in §2.1 / §8.3.9).
+- There is no signature-checking view: drills are off-chain (§2.1), so a
+  trigger signature is never sent to an RPC before the real trigger.
 
 ### 6.3 Single-set storage + permanent burn (INV-SIGN-7)
 
@@ -805,8 +871,8 @@ validating known verifier encodings before submitting Safe calldata:
 Malformed keys are rejected at trigger time (the verifier's `verify(...)`
 for `verifier || key` identities, or native ECDSA/ERC-1271 for 20-byte
 identities), which Lockdown normalises to `BadSignature()`. Runbooks
-should therefore include a `testSigner(...)` drill for newly registered
-signers.
+should therefore include an off-chain drill (`script/DrillSigner.s.sol`,
+§2.1) for newly registered signers.
 
 ### 8.3 Timelock V1: schedule / wait / execute (or HSM bypass)
 
@@ -1098,6 +1164,7 @@ type each registered signer uses.
 - **Operational ask**: a single hardware wallet (Ledger, Trezor) per
   panic signer. Even a printed paper-wallet EOA used once is
   acceptable; the burn semantics make rotation cheap.
+- **ERC-1271 failure-domain rule (AR-22, NM-1060 6.3)**: native 20-byte contract identities are supported, but a Lockdown-protected Safe must NOT be registered as a lockdown signer of another Safe, nor of itself. Its fallback handler rejects validation while it is LockedDown or Recovering, so an attacker who freezes it through one of its own panic signers disarms it exactly when it is needed. A Normal-state off-chain drill (`script/DrillSigner.s.sol`) is only a point-in-time result. More generally, quorum signers and lockdown signers face opposite expectations: owners optimise for security and deliberation, lockdown signers for independence and reactivity. A Safe (multi-party, slow, possibly frozen) is a very bad lockdown signer. Use an independent EOA or separately approved shipped verifier identity.
 
 Register signers of this type first. Reach for tier 2 only if a
 hardware wallet is genuinely unavailable.
@@ -1125,6 +1192,11 @@ hardware wallet is genuinely unavailable.
   replaying an observed cleartext trigger onto the same-address Safe on
   another chain (T-PWD-CROSS-CHAIN, SPEC_V1 §14.1). A password commitment
   is unique per Safe and per chain, no exception.
+- **One identity per commitment**: never register the same commitment
+  under two identities on one Safe (e.g. two `PasswordVerifier`
+  deployments). The trigger message binds the signer identity, but
+  `PasswordVerifier` ignores the message, so the first trigger's cleartext
+  fires the second identity too (T-PWD-MULTI-IDENTITY, SPEC_V1 §H.23).
 - **Drills consume the password permanently** AND the on-chain
   `signerBurntPermanently` set (V1 INV-SIGN-7, C4) enforces this:
   re-registering the same commitment reverts
@@ -1147,10 +1219,9 @@ hardware wallet is genuinely unavailable.
   compromised; immediately call `removeLockdownSigner(passwordVerifier ||
   commitment)` during Recovering (allowed per H.4), or in Normal.
   The INV-SIGN-7 burnt-identity gate then prevents accidental re-use.
-- **No safe `testSigner` calls**: invoking
-  `Lockdown.testSigner(passwordVerifier || commitment, hash, password)`
-  would leak the password to the RPC provider. Use ONLY with a
-  throwaway test password, never the real one.
+- **Drill offline only**: check `keccak256(password) == commitment`
+  locally. Never send the cleartext to any RPC or service before the real
+  trigger (it is the signature, and anyone holding it can trigger).
 
 Register a `PasswordVerifier` signer ONLY when:
 
@@ -1196,7 +1267,7 @@ documented in `specs/SPEC_V1.md` §14.
   value on inputs it should reject grants lockdown authority to whoever
   can call trigger against a registered signer under it. There is no
   on-chain verifier-approval step or smoke test to catch this; pre-use
-  vetting is off-chain preflight plus the `testSigner` view. Once
+  vetting is off-chain preflight plus the off-chain drill (§2.1). Once
   registered, the mitigation is to remove every affected signer identity
   via per-signer `removeLockdownSigner` (allowed in Normal and, via H.4,
   during Recovering), batched through native MultiSend.
@@ -1216,17 +1287,21 @@ documented in `specs/SPEC_V1.md` §14.
   == 0` (H.15) so monitoring catches the state and can page oncall.
   The quorum re-arms by registering a fresh signer identity after
   resume.
+- **Same-transaction incident boundary (AR-23)**: Lockdown hooks decide whether a Safe execution may begin. If an already authorized call tree invokes `triggerLockdown` after its pre-hook, later instructions in that same atomic EVM transaction can complete. This does not let the callback perform anything beyond the exact owner/module-authorized call; an independent panic transaction must be mined first to stop it. A post-hook revert would also revert the lockdown and is therefore not a safe remedy.
+- **Correlated ERC-1271 panic signer (AR-22)**: another Lockdown-protected Safe can pass an exact drill as a native ERC-1271 panic identity in Normal and then become unavailable when its own handler freezes signatures during LockedDown or Recovering. It must not be the only identity protecting the target Safe.
 - **Multi-Safe operations from one quorum**: cross-Safe signer reuse
   requires per-Safe registration. By design (INV-ISO-1).
 - **Drills consume signers**: a real drill produces a real burn. Slots
   reclaim on remove/burn, so drills are unlimited in count but cost
   one cycle of `lockdownDuration + resumeDelay` per drill (and one
-  fresh registration to re-arm). The `testSigner` view (H.17)
-  exists to dry-run the signer-verification piece without the lockup.
+  fresh registration to re-arm). The off-chain drill
+  (`script/DrillSigner.s.sol`, §2.1) dry-runs the signer-verification piece
+  without the lockup and without exposing the signature.
 - **No `cancelLockdown` / unilateral unlock**: a false-positive trigger
   costs `lockdownDuration + resumeDelay`; since PR #59 remaining signers
-  can re-trigger to extend/re-lock (bounded by `≤ (remaining signers) ×
-  lockdownDuration`, INV-LIFE-2). No "owner override".
+  can re-trigger to extend/re-lock (worst case `k × (lockdownDuration +
+  resumeDelay) − (k − 1)` seconds for `k` remaining signers, re-triggering at
+  the last second of each Recovering, INV-LIFE-2, H.24). No "owner override".
 - **No emergency owner / pauser / proxy / upgradeability**: no mutable
   code on the trust path. **Migration takes TWO owner transactions, not
   one, and has an unavoidable fail-open window (corrected 2026-08-25).**

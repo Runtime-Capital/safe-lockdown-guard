@@ -49,6 +49,13 @@ def test_scope_table_columns_are_extracted_independently():
 
 
 @case
+def test_external_scope_count_is_not_hard_coded_to_ten():
+    text = "production scope contains 11 Solidity files, 2,405 physical lines"
+    pattern = scope.PATTERNS["scope_file_count"]["grant/ARETA_APPLICATION_ANSWERS.md"]
+    assert scope.extract_claims(text, pattern) == [11]
+
+
+@case
 def test_every_declared_target_has_an_anchored_pattern():
     missing = []
     for key, spec in scope.CLAIMS.items():
@@ -61,15 +68,15 @@ def test_every_declared_target_has_an_anchored_pattern():
 @case
 def test_current_repository_claims_are_located_and_exact():
     metrics = {
-        "loc_total": 2312,
-        "nsloc_total": 1118,
-        "scope_file_count": 10,
-        "test_total": 483,
-        "poc_test_total": 137,
-        "poc_file_count": 12,
-        "lockdown_timelock_runtime": 17590,
-        "lockdown_timelock_margin": 6986,
-        "lockdown_runtime": 12320,
+        "loc_total": 2405,
+        "nsloc_total": 1144,
+        "scope_file_count": 11,
+        "test_total": 601,
+        "poc_test_total": 237,
+        "poc_file_count": 21,
+        "lockdown_timelock_runtime": 17937,
+        "lockdown_timelock_margin": 6639,
+        "lockdown_runtime": 12555,
     }
     failures, skipped, checked = scope.check(metrics, None)
     expected_checked = sum(

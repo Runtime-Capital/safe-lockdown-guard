@@ -45,11 +45,11 @@ Impossible to generate IR for LockdownTimelock._inFlightModuleTicket
 (src/base/Timelock.sol#417-419): 'NoneType' object has no attribute 'parameters'
 ```
 
-Triage: **tool limitation**. The affected helper derives an ERC-7201-style
-transient-storage slot for the module timelock in-flight ticket. The behaviour
-is covered by unit tests (`test_moduleHook_reentrantPreHookReverts_INV_TIME_11`,
-`test_moduleHook_inFlightClearedOnFailure`, `test_postHook_crossSafeIsolation`)
-and Echidna (`echidna_sweepClearsExpiredOwnerTicketSlot` / module-path invariants).
+Triage: **tool limitation**. The affected helper derived an ERC-7201-style
+transient-storage slot for the module timelock in-flight ticket. That helper has
+since been removed (module tickets are now consumed in the pre-hook and restored
+on failure, with no transient state), so this warning is expected to disappear on
+the next regeneration; this section has not been re-run since.
 
 | Detector | Instances | Site | Triage |
 |---|---:|---|---|

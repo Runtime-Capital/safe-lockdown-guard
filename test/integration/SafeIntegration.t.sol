@@ -482,15 +482,141 @@ contract SafeIntegrationTest is TestEnvironment {
         assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "ticket consumed");
     }
 
+    function test_timelock_module_ticketConsumedAfterTimelockDisabled() public {
+        bytes32 moduleHash = _scheduleModuleThenDisableTimelock(module, TARGET, "");
+
+        // Timelock disabled => executes AND consumes the leftover ticket
+        _moduleCall(module, safe, TARGET, 0, "", Enum.Operation.Call);
+        assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "ticket consumed");
+
+        // Re-enabling the timelock (free 0 -> N) does not allow an immediate replay
+        _enableTimelock(safe, 24 hours);
+        _moduleCall_Revert(module, safe, TARGET, 0, "", Enum.Operation.Call, Timelock.TicketNotFound.selector);
+    }
+
+    function test_timelock_module_failedCallRestoresTicket() public {
+        _enableTimelock(safe, 24 hours);
+        ModuleHelper helper = new ModuleHelper();
+        bytes memory data = abi.encodeCall(ModuleHelper.fail, ());
+        _execAsOwner(
+            safe,
+            address(guard),
+            0,
+            abi.encodeCall(
+                LockdownTimelock.scheduleModuleTransaction, (module, address(helper), 0, data, Enum.Operation.Call)
+            ),
+            Enum.Operation.Call
+        );
+        bytes32 moduleHash =
+            guard.getModuleTransactionHash(address(safe), module, address(helper), 0, data, Enum.Operation.Call);
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        // Inner call fails (Safe v1.5.0 does not bubble) => ticket re-created, executable now
+        vm.prank(module);
+        assertFalse(safe.execTransactionFromModule(address(helper), 0, data, Enum.Operation.Call));
+        assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), block.timestamp, "ticket restored");
+    }
+
+    function test_timelock_module_failedCallBurnsTicketWhenTimelockDisabled() public {
+        ModuleHelper helper = new ModuleHelper();
+        bytes memory data = abi.encodeCall(ModuleHelper.fail, ());
+        bytes32 moduleHash = _scheduleModuleThenDisableTimelock(module, address(helper), data);
+
+        // Timelock disabled: the ticket is not needed to execute, and is not restored on failure
+        vm.prank(module);
+        assertFalse(safe.execTransactionFromModule(address(helper), 0, data, Enum.Operation.Call));
+        assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "ticket burnt");
+    }
+
+    function test_timelock_module_nestedReplayOfSameTxIsRejected() public {
+        ModuleHelper helper = new ModuleHelper();
+        _enableModule(safe, address(helper));
+        _enableTimelock(safe, 24 hours);
+        bytes memory data = abi.encodeCall(ModuleHelper.replay, (safe));
+        _execAsOwner(
+            safe,
+            address(guard),
+            0,
+            abi.encodeCall(
+                LockdownTimelock.scheduleModuleTransaction,
+                (address(helper), address(helper), 0, data, Enum.Operation.Call)
+            ),
+            Enum.Operation.Call
+        );
+        bytes32 moduleHash = guard.getModuleTransactionHash(
+            address(safe), address(helper), address(helper), 0, data, Enum.Operation.Call
+        );
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        // The outer module tx tries to re-execute itself: the nested pre-hook finds the ticket already consumed
+        _moduleCall(address(helper), safe, address(helper), 0, data, Enum.Operation.Call);
+        assertFalse(helper.replaySucceeded(), "nested replay rejected");
+        assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "ticket consumed once");
+    }
+
+    function test_timelock_module_nestedCallDoesNotSkipOuterConsumptionAfterTimelockDisabled() public {
+        ModuleHelper helper = new ModuleHelper();
+        _enableModule(safe, address(helper));
+        bytes memory data = abi.encodeCall(ModuleHelper.reenter, (safe, TARGET));
+        bytes32 moduleHash = _scheduleModuleThenDisableTimelock(address(helper), address(helper), data);
+
+        // Outer module tx re-enters the Safe through a nested module tx
+        _moduleCall(address(helper), safe, address(helper), 0, data, Enum.Operation.Call);
+        assertEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "outer ticket consumed");
+    }
+
+    /// @dev Registers an HSM bypasser, enables the timelock, schedules a module tx, waits, then disables the timelock
+    ///      (via the bypasser, so no owner ticket is needed). Returns the module tx hash.
+    function _scheduleModuleThenDisableTimelock(address module_, address to, bytes memory data)
+        internal
+        returns (bytes32)
+    {
+        _execAsOwner(
+            safe, address(guard), 0, abi.encodeCall(Timelock.setTimelockBypasser, (HSM, true)), Enum.Operation.Call
+        );
+        _enableTimelock(safe, 24 hours);
+
+        _execAsOwner(
+            safe,
+            address(guard),
+            0,
+            abi.encodeCall(LockdownTimelock.scheduleModuleTransaction, (module_, to, 0, data, Enum.Operation.Call)),
+            Enum.Operation.Call
+        );
+        bytes32 moduleHash = guard.getModuleTransactionHash(address(safe), module_, to, 0, data, Enum.Operation.Call);
+        assertNotEq(guard.getModuleTransactionExecutableAt(address(safe), moduleHash), 0, "ticket scheduled");
+
+        vm.warp(block.timestamp + 24 hours + 1);
+
+        vm.startPrank(HSM);
+        _execAsOwner(
+            safe, address(guard), 0, abi.encodeCall(Timelock.setTimelockDelay, (uint64(0))), Enum.Operation.Call
+        );
+        vm.stopPrank();
+        assertEq(guard.getTimelockDelay(address(safe)), 0, "timelock disabled");
+
+        return moduleHash;
+    }
+
     // -------------------------------------------------------------------
     // Fallback handler
     // -------------------------------------------------------------------
 
     // -------------------------------------------------------------------
-    // Normal state: handler behaves like CompatibilityFallbackHandler
+    // Normal state: once opted in (SPEC_V1 H.27), the handler behaves like
+    // CompatibilityFallbackHandler. ERC-1271 is disabled by default.
     // -------------------------------------------------------------------
 
-    function test_normal_validSignatureReturnsMagic() public view {
+    function test_normal_erc1271DisabledByDefault() public {
+        assertFalse(guard.isErc1271Allowed(address(safe)), "default disabled");
+        bytes32 hash = keccak256("authorise something");
+        bytes memory signature = _signMessage(safe, OWNER_PK, hash);
+        vm.expectRevert(LockdownFallbackHandler.Erc1271Disabled.selector);
+        IERC1271(address(safe)).isValidSignature(hash, signature);
+    }
+
+    function test_normal_validSignatureReturnsMagic() public {
+        _allowErc1271(safe);
         bytes32 hash = keccak256("authorise something");
         bytes memory signature = _signMessage(safe, OWNER_PK, hash);
         assertTrue(
@@ -500,9 +626,10 @@ contract SafeIntegrationTest is TestEnvironment {
     }
 
     function test_normal_wrongSignerReverts() public {
+        _allowErc1271(safe);
         bytes32 hash = keccak256("authorise something");
         bytes memory signature = _signMessage(safe, PANIC_PK, hash); // not an owner
-        vm.expectRevert();
+        vm.expectRevert("GS026");
         IERC1271(address(safe)).isValidSignature(hash, signature);
     }
 
@@ -558,6 +685,7 @@ contract SafeIntegrationTest is TestEnvironment {
     }
 
     function test_afterResume_signatureUnfrozen() public {
+        _allowErc1271(safe);
         _triggerLockdown(safe, keccak256("wrench"));
         vm.warp(block.timestamp + 48 hours + 4 hours + 1); // past resumeDelay -> auto-resumed to Normal
 
@@ -619,5 +747,29 @@ contract SafeIntegrationTest is TestEnvironment {
 
     function _packSortedSignatures(bytes memory ownerSig, bytes memory otherSig) private view returns (bytes memory) {
         return owner < other ? bytes.concat(ownerSig, otherSig) : bytes.concat(otherSig, ownerSig);
+    }
+}
+
+/// @dev Test-only target / module: `fail` reverts, `reenter` performs a nested module tx on `safe`, `replay` re-executes
+///      itself as a nested module tx (both require this contract to be an enabled module of `safe`).
+contract ModuleHelper {
+    function fail() external pure {
+        revert();
+    }
+
+    function reenter(Safe safe, address to) external {
+        require(safe.execTransactionFromModule(to, 0, "", Enum.Operation.Call));
+    }
+
+    bool public replaySucceeded;
+
+    function replay(Safe safe) external {
+        // Swallow the nested revert so the outer module tx itself succeeds.
+        (replaySucceeded,) = address(safe)
+            .call(
+                abi.encodeCall(
+                    IModuleManager.execTransactionFromModule, (address(this), 0, msg.data, Enum.Operation.Call)
+                )
+            );
     }
 }

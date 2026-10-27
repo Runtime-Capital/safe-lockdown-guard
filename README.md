@@ -84,9 +84,9 @@ v1.0.0 audit candidate, scope-locked. Not deployed to mainnet.
 
 | | |
 |---|---|
-| Solidity | 2,312 physical lines across 10 source files, 1,118 nSLOC |
-| Tests | 483 Foundry unit, fuzz, integration and proof-of-behaviour tests |
-| Fuzzing | 15 Echidna stateful properties, plus Medusa and sampled mutation testing |
+| Solidity | 2,405 physical lines across 11 source files, 1,144 nSLOC |
+| Tests | 601 Foundry unit, fuzz, integration and proof-of-behaviour tests |
+| Fuzzing | 16 Echidna stateful properties, plus Medusa and sampled mutation testing |
 | Integration | Real Safe v1.5.0 deployed through the canonical mainnet `SafeProxyFactory` |
 | Static analysis | Slither, Aderyn and Semgrep, triaged in `docs/STATIC_ANALYSIS_TRIAGE.md` |
 
@@ -144,13 +144,17 @@ serious conversation about the product:
 4. **Three install slots per Safe.** Lockdown occupies the transaction-guard
    slot (`setGuard`), the module-guard slot (`setModuleGuard`), AND the
    fallback-handler slot (`setFallbackHandler`, a `LockdownFallbackHandler`
-   bound to the singleton that freezes the Safe's ERC-1271 surface during an
-   incident; signatures and approvals produced BEFORE the incident remain
-   valid - see the accepted-risk register in `AUDIT_BRIEF.md`).
+   bound to the singleton. Its ERC-1271 surface is disabled unless the Safe
+   opts in with `setErc1271Allowed(true)`, and frozen during an incident
+   either way; for an opted-in Safe, signatures and approvals produced BEFORE
+   the incident remain valid - see the accepted-risk register in
+   `AUDIT_BRIEF.md`).
    `initialize` reverts unless all three are wired to the singleton
    / its handler. Lockdown is therefore mutually exclusive with any other guard
    (Safenet, Fiducia, Policy Engine, Kleidi, Optimism TimelockGuard, a future
-   on-chain Safe Shield guard) and with any custom fallback handler.
+   on-chain Safe Shield guard) and with any custom fallback handler. Which
+   modules, owner types and extensions can coexist with it is set out in
+   `docs/COMPATIBILITY.md`.
 5. **The timelock bypasser is a trusted fast lane.** `bypassTimelock` is
    restricted to a per-Safe allowlist. Any service using that authority must
    simulate and policy-check the full transaction off-chain before bypassing;
@@ -275,6 +279,8 @@ The compiler profile is pinned in `foundry.toml`:
 
 - Lockdown is triggered by a 1-of-N registered ERC-7913 `bytes` lockdown signer
   (a 20-byte EOA/ERC-1271 address, or `verifier || key`).
+- A Lockdown-protected Safe must not be the sole ERC-1271 panic identity of another Safe: its own incident handler intentionally freezes ERC-1271, creating a correlated liveness dependency. Keep an independent panic identity.
+- Lockdown blocks Safe executions whose pre-hook begins after the incident transition; it cannot interrupt later instructions in the same atomic EVM call tree that invokes `triggerLockdown` after its pre-hook.
 - Lockdown duration is configured at deployment and can be changed later by Safe
   quorum only while the guard is in normal mode.
 - Recovery stays active after expiry and for the configured `resumeDelay`,
@@ -338,7 +344,12 @@ The compiler profile is pinned in `foundry.toml`:
 - `scripts/audit-check.sh` - one-command local verification.
 - `scripts/preflight-install-v1.sh` - read-only on-chain pre-install verifier;
   run before signing `setGuard + setModuleGuard + setFallbackHandler`.
+  `--snapshot-out <file>` records owners, threshold and enabled modules.
 - `scripts/verify-install-v1.sh` - read-only on-chain post-install verifier.
+  `--snapshot <file>` FAILs if the install changed owners, threshold or
+  modules; a dormant install (no signers) FAILs unless `--allow-dormant`.
+- `scripts/operator-e2e-anvil.sh` (`make operator-e2e`) - runs both scripts
+  end to end against real Safe v1.5.0 + Lockdown bytecode on a local anvil.
 - `scripts/package-audit.sh` - optional utility to produce a clean source snapshot (excludes generated artifacts and local-only files).
 
 Deployment helper frontends under `deploy/*.local.*` are intentionally ignored

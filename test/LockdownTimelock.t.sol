@@ -11,6 +11,7 @@ import {MultiSendCallOnly} from "@safe-global/safe-smart-account/libraries/Multi
 
 import {LockdownTimelock, Lockdown} from "../src/LockdownTimelock.sol";
 import {Timelock} from "../src/base/Timelock.sol";
+import {LockdownLib} from "../src/utils/LockdownLib.sol";
 import {StateMachine} from "../src/base/StateMachine.sol";
 import {console} from "forge-std/console.sol";
 
@@ -1011,9 +1012,8 @@ contract LockdownTimelockTest is TestEnvironment {
     // Finding-2 fix: the four guard-hook selectors are internal machinery the Safe
     // invokes around execution; routing any of them through a user tx
     // (execTransaction / a scheduled ticket) is rejected on every path. Otherwise a
-    // pre-signed owner-path call to checkAfterModuleExecution(0,false) would clear the
-    // module reentrancy in-flight slot mid-flight and let one scheduled module ticket
-    // execute twice (INV-TIME-11).
+    // pre-signed owner-path call to checkAfterModuleExecution(hash,false) would
+    // (re-)create an immediately executable module ticket, bypassing the timelock.
     function test_ownerHook_guardHookSelectorsDeniedAsSingletonTarget() public {
         _assertOwnerCallToGuardSelectorDenied(LockdownTimelock.checkTransaction.selector);
         _assertOwnerCallToGuardSelectorDenied(LockdownTimelock.checkAfterExecution.selector);
@@ -1103,12 +1103,12 @@ contract LockdownTimelockTest is TestEnvironment {
         vm.prank(address(SAFE_A));
         bytes32 h2 = guard.checkModuleTransaction(TARGET, 0, hex"22", Enum.Operation.Call, MODULE_A);
         assertEq(h2, moduleTxHash, "checkModuleTransaction should return module hash");
-        // V1 review round 3: ticket is consumed in the post-hook gated on
-        // success. Simulate the Safe v1.5.0 flow.
+        // The pre-hook consumed the ticket; a successful post-hook keeps it
+        // consumed. Simulate the Safe v1.5.0 flow.
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(moduleTxHash, true);
         // Second pre-hook call (same module tx) now reverts because the
-        // post-hook deleted the ticket.
+        // ticket was consumed.
         vm.prank(address(SAFE_A));
         vm.expectRevert(Timelock.TicketNotFound.selector);
         guard.checkModuleTransaction(TARGET, 0, hex"22", Enum.Operation.Call, MODULE_A);
@@ -1198,13 +1198,13 @@ contract LockdownTimelockTest is TestEnvironment {
     }
 
     // -------------------------------------------------------------------
-    // Review round 3 (INV-TIME-4 hardening): post-hook ticket consumption
-    // gated on success. A failed inner call must NOT burn the ticket.
+    // Review round 3 (INV-TIME-4 hardening): a failed inner call must NOT
+    // burn the ticket (module-path: re-created by the post-hook).
     // -------------------------------------------------------------------
 
     /// @dev Module-path: a failed inner module call (success=false from
-    ///      Safe.execTransactionFromModule's catch) MUST leave the ticket
-    ///      in storage. Operator can retry the SAME module tx with
+    ///      Safe.execTransactionFromModule's catch) MUST re-create the ticket
+    ///      the pre-hook consumed. Operator can retry the SAME module tx with
     ///      identical params and the ticket is still consumable.
     function test_moduleHook_postHookFailure_leavesTicketForRetry() public {
         _enableTimelock(SAFE_A, 24 hours);
@@ -1217,6 +1217,7 @@ contract LockdownTimelockTest is TestEnvironment {
         // Simulate ExecutionFromModuleFailure: post-hook with success=false.
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(h1, false);
+        assertEq(guard.getModuleTransactionExecutableAt(address(SAFE_A), h1), block.timestamp, "ticket restored at now");
 
         // Retry: the ticket survives, the same module tx can be re-executed.
         vm.prank(address(SAFE_A));
@@ -1310,35 +1311,33 @@ contract LockdownTimelockTest is TestEnvironment {
 
     /// @dev Review round 3 Prompt-3 audit follow-up (H-1):
     ///      module-path reentrancy via target → module → execTransactionFromModule
-    ///      with identical params would double-spend a single ticket
-    ///      with the verify-only pre-hook unless an in-flight guard blocks
-    ///      the inner pre-hook. Simulates the reentrancy directly: outer
-    ///      pre-hook fires, then before any post-hook the inner pre-hook
-    ///      runs (same params from the same Safe) and MUST revert
-    ///      ReentrantModuleTimelockExecution. Outer post-hook then
-    ///      completes normally and consumes the ticket exactly once.
+    ///      with identical params would double-spend a single ticket if
+    ///      the inner pre-hook could still see it. Simulates the reentrancy
+    ///      directly: outer pre-hook fires (and consumes the ticket), then
+    ///      before any post-hook the inner pre-hook runs (same params from
+    ///      the same Safe) and MUST revert TicketNotFound. Outer post-hook
+    ///      then completes normally: the ticket is used exactly once.
     function test_moduleHook_reentrantPreHookReverts_INV_TIME_11() public {
         _enableTimelock(SAFE_A, 24 hours);
         vm.prank(address(SAFE_A));
         guard.scheduleModuleTransaction(MODULE_A, TARGET, 0, hex"77", Enum.Operation.Call);
         vm.warp(block.timestamp + 24 hours + 1);
 
-        // Outer pre-hook: sets inFlightModuleTicket.
+        // Outer pre-hook: consumes the ticket.
         vm.prank(address(SAFE_A));
         bytes32 h1 = guard.checkModuleTransaction(TARGET, 0, hex"77", Enum.Operation.Call, MODULE_A);
         assertNotEq(h1, bytes32(0), "outer pre-hook returned zero");
 
         // Inner reentrant pre-hook BEFORE the outer's post-hook fires:
-        // MUST revert because inFlightModuleTicket is non-zero.
+        // MUST revert because the ticket is already consumed.
         vm.prank(address(SAFE_A));
-        vm.expectRevert(LockdownTimelock.ReentrantModuleTimelockExecution.selector);
+        vm.expectRevert(Timelock.TicketNotFound.selector);
         guard.checkModuleTransaction(TARGET, 0, hex"77", Enum.Operation.Call, MODULE_A);
 
-        // Outer post-hook completes: clears in-flight, deletes ticket.
+        // Outer post-hook completes successfully: ticket stays consumed.
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(h1, true);
 
-        // After post-hook, in-flight is clear AND ticket is consumed.
         // A retry with same params now reverts TicketNotFound (single-use
         // INV-TIME-4 holds).
         vm.prank(address(SAFE_A));
@@ -1346,33 +1345,41 @@ contract LockdownTimelockTest is TestEnvironment {
         guard.checkModuleTransaction(TARGET, 0, hex"77", Enum.Operation.Call, MODULE_A);
     }
 
-    /// @dev Companion to the reentrancy guard: confirm the in-flight slot
-    ///      is cleared even when the outer post-hook fires with
-    ///      success=false. Otherwise a single failed module tx would brick
-    ///      the timelock path permanently. Critical for retry semantics.
-    function test_moduleHook_inFlightClearedOnFailure() public {
+    /// @dev A failed module call re-creates its ticket with
+    ///      `executableAt = now`: never earlier than the original (the
+    ///      pre-hook verified it was executable), but the TTL window restarts.
+    function test_moduleHook_failureRestoresTicketWithFreshTtl() public {
         _enableTimelock(SAFE_A, 24 hours);
-        // schedule
         vm.prank(address(SAFE_A));
         bytes32 moduleTxHash = guard.scheduleModuleTransaction(MODULE_A, TARGET, 0, hex"88", Enum.Operation.Call);
-        assertNotEq(moduleTxHash, bytes32(0), "module hash should be non-zero");
-        // wait
-        vm.warp(block.timestamp + 24 hours + 1);
-        // pre-hook returns the ticket key
+        uint64 executableAt = guard.getModuleTransactionExecutableAt(address(SAFE_A), moduleTxHash);
+
+        // Fail at the last executable second of the original TTL window.
+        vm.warp(uint256(executableAt) + guard.TICKET_TTL());
         vm.prank(address(SAFE_A));
         bytes32 h1 = guard.checkModuleTransaction(TARGET, 0, hex"88", Enum.Operation.Call, MODULE_A);
-        assertEq(h1, moduleTxHash, "checkModuleTransaction should return module hash");
-        // Failure post-hook clears in-flight but leaves ticket.
+        vm.expectEmit(address(guard));
+        emit Timelock.TicketRestored(address(SAFE_A), LockdownLib.moduleTicketKey(h1), uint64(block.timestamp));
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(h1, false);
 
-        // A new pre-hook must succeed (in-flight is clear) AND the ticket
-        // is still consumable (success=false did not delete it).
+        // Past the original TTL, the restored ticket is still executable.
+        vm.warp(block.timestamp + 1 days);
         vm.prank(address(SAFE_A));
         bytes32 h2 = guard.checkModuleTransaction(TARGET, 0, hex"88", Enum.Operation.Call, MODULE_A);
         assertEq(h1, h2, "ticket key drifted across retry");
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(h2, true);
+        assertEq(guard.getModuleTransactionExecutableAt(address(SAFE_A), moduleTxHash), 0, "ticket consumed");
+    }
+
+    /// @dev While the timelock is disabled the post-hook never creates a
+    ///      ticket: a failed (or spoofed) post-hook is a no-op.
+    function test_moduleHook_postHookFailureWithoutTimelock_isNoOp() public {
+        bytes32 fakeHash = keccak256("never-scheduled");
+        vm.prank(address(SAFE_A));
+        guard.checkAfterModuleExecution(fakeHash, false);
+        assertEq(guard.getModuleTransactionExecutableAt(address(SAFE_A), fakeHash), 0, "no ticket created");
     }
 
     /// @dev Cross-Safe isolation in the post-hook: address(SAFE_B) calling the
@@ -1448,7 +1455,7 @@ contract LockdownTimelockTest is TestEnvironment {
         guard.checkModuleTransaction(to, 0, data, operation, MODULE_A);
     }
 
-    function _lockdownMsgHash(address safe, bytes32 reasonHash) private view returns (bytes32) {
+    function _lockdownMsgHash(address safe, bytes memory signer, bytes32 reasonHash) private view returns (bytes32) {
         (, string memory name, string memory version, uint256 chainId, address verifyingContract,,) =
             guard.eip712Domain();
         bytes32 domainSep = keccak256(
@@ -1461,7 +1468,11 @@ contract LockdownTimelockTest is TestEnvironment {
             )
         );
         return keccak256(
-            abi.encodePacked("\x19\x01", domainSep, keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, reasonHash)))
+            abi.encodePacked(
+                "\x19\x01",
+                domainSep,
+                keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, keccak256(signer), reasonHash))
+            )
         );
     }
 
@@ -1533,10 +1544,9 @@ contract LockdownTimelockTest is TestEnvironment {
         vm.prank(address(SAFE_A));
         guard.checkModuleTransaction(TARGET, 0, payload, Enum.Operation.Call, MODULE_A);
 
-        // Close the module execution with success=false: clears the
-        // INV-TIME-11 reentrancy flag and (INV-TIME-4) does NOT consume the
-        // ticket, so the cancellation path below exercises a still-live
-        // stale ticket.
+        // Close the module execution with success=false: (INV-TIME-4) the
+        // post-hook re-creates the ticket the pre-hook consumed, so the
+        // cancellation path below exercises a still-live stale ticket.
         vm.prank(address(SAFE_A));
         guard.checkAfterModuleExecution(moduleTxHash, false);
         // Cleanup path: the quorum cancels the stale ticket, after which

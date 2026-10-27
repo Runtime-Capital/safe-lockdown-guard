@@ -164,7 +164,7 @@ recursion depth (which their Safe v1.4.1 target cannot express, and which their
 spec declares out of scope); success-gated post-hook ticket consumption
 (INV-TIME-4) vs their pre-hook burn; hash privacy under coercion;
 `TICKET_TTL` expiry vs their immortal scheduled txs; the entire
-lockdown/recovery incident layer; the bypass availability lane; 15 stateful
+lockdown/recovery incident layer; the bypass availability lane; 16 stateful
 Echidna invariants on the guard.
 
 Theirs: on-chain queue transparency for watchtowers; sub-quorum cancellation
@@ -172,6 +172,15 @@ with audited anti-griefing math; anti signature-theft executor check
 (iSAFE-008); O(1) state wipe on uninstall (iSAFE-012); signature-compatible
 scheduling UX (no extra quorum ceremony per scheduled transaction); normative spec in
 the OP specs repo and a clean Spearbit review.
+
+**ERC-1271 under the timelock.** Their TimelockGuard leaves the Safe's
+ERC-1271 surface open: the guard only wraps `execTransaction`, and an admin
+Safe signs nothing that settles off-chain, so that is outside their threat
+model. For a fund Safe it is inside ours (NM-1060 6.1): a `permit`, an
+EIP-3009 authorisation or an off-chain order settles with no guard hook and
+no timelock reaction window. Lockdown therefore ships its own fallback handler,
+which refuses ERC-1271 unless the Safe opted in (`setErc1271Allowed`, SPEC_V1
+H.27) and refuses it during every incident.
 
 ## 8. What we deliberately do NOT borrow
 

@@ -331,8 +331,9 @@
           </label>
         </div>
         <label style="margin-top:8px"><span><input type="checkbox" id="installIncludeInit" style="width:auto" checked /> Include initialize() from step 3 in the batch (uncheck if the Safe is already initialised)</span></label>
+        <label style="margin-top:8px"><span><input type="checkbox" id="installAllowErc1271" style="width:auto" checked /> Accept the Safe's ERC-1271 signatures (<code>setErc1271Allowed(true)</code> after initialize). <span id="installErc1271Hint"></span> The contract default is off (SPEC_V1 H.27) and every lockdown trigger turns it off again; this box only decides whether the install batch turns it on. Unticked, the Safe validates no off-chain message: no permit, EIP-3009, Permit2, CoW / Seaport order, SIWE login, nested-Safe owner signature, nor use as another Safe's panic identity.</span></label>
         <div class="actions">
-          <button class="secondary" id="buildInstall" title="Runs the full codehash + interface preflight, then builds an atomic [setGuard, setModuleGuard, setFallbackHandler, initialize?] batch.">Preflight &amp; build install batch</button>
+          <button class="secondary" id="buildInstall" title="Runs the full codehash + interface preflight, then builds an atomic [setGuard, setModuleGuard, setFallbackHandler, initialize?, setErc1271Allowed(true)?] batch.">Preflight &amp; build install batch</button>
         </div>
         <div class="output"><pre id="installOut">No install preflight run yet.</pre></div>
 
@@ -361,7 +362,7 @@
       <!-- ============================ 5 VERIFIERS & SIGNERS ============================ -->
       <section id="verifiers">
         <div class="sectitle"><span class="badge">5</span><h2>Verifiers &amp; panic signers</h2></div>
-        <p>Register explicit <code>bytes</code> panic-signer identities (ecdsa = the 20-byte address itself; password/webauthn = verifier || key). Use the drill (<code>testSigner</code>) to confirm a real identity+signature verifies without burning a signer.</p>
+        <p>Register explicit <code>bytes</code> panic-signer identities (ecdsa = the 20-byte address itself; password/webauthn = verifier || key). Before a real trigger, verify the signature locally in step 7 (the signature never leaves this browser); identities that cannot be checked locally are covered by the off-contract Foundry drill <code>script/DrillSigner.s.sol</code> run against a local fork.</p>
         <div class="grid">
           <label>Safe address
             <input id="sigSafe" placeholder="0x..." />
@@ -446,6 +447,9 @@
           <label>Timelock delay (seconds, 0 or 1h..30d)
             <input id="tlDelay" value="86400" />
           </label>
+          <label>ERC-1271, in the same transaction
+            <select id="tlErc1271"><option value="off">turn off: setErc1271Allowed(false)</option><option value="on">keep / turn on: setErc1271Allowed(true)</option><option value="unchanged">leave unchanged</option></select>
+          </label>
           <label>Bypasser address (HSM)
             <input id="tlBypasser" placeholder="0x..." />
           </label>
@@ -454,7 +458,7 @@
           </label>
         </div>
         <div class="actions">
-          <button class="secondary" id="buildSetTimelock" title="Builds setTimelockDelay(delay). The first 0->N activation is free; later changes are themselves timelocked.">Build setTimelockDelay</button>
+          <button class="secondary" id="buildSetTimelock" title="Builds [setErc1271Allowed(choice)?, setTimelockDelay(delay)] as one batch. The first 0->N activation is free; later changes are themselves timelocked.">Build setTimelockDelay</button>
           <button class="secondary" id="buildSetBypasser" title="Builds setTimelockBypasser(addr, enabled). HSM compromise = full bypass authority - off-chain policy must refuse disarm bypasses.">Build setTimelockBypasser</button>
           <button class="secondary" id="buildBypassTimelock" title="HSM-side direct call: bypassTimelock(safe, safeTxHash) sets executableAt = now for one owner-path tx. The caller must be an allowlisted bypasser. Uses the owner-path fields below.">Build bypassTimelock (HSM)</button>
         </div>
@@ -527,7 +531,7 @@
         <div class="sectitle"><span class="badge">7</span><h2>Trigger lockdown (EIP-712 panic flow)</h2></div>
         <div class="dangerbox">
           Single-use: a successful trigger <strong>burns</strong> the signer entry and permanently retires that <code>bytes</code> identity.
-          The whole Safe freezes for <code>lockdownDuration + resumeDelay</code>. Always run the read-only drill first.
+          The whole Safe freezes for <code>lockdownDuration + resumeDelay</code>. Always verify the signature locally first.
         </div>
         <div class="dangerbox" style="margin-top:10px">
           Password trigger: the cleartext is exposed to the RPC provider and mempool. This is acceptable only as a one-time password: successful execution burns it permanently. If submission fails or reverts, assume the password leaked while still live and replace it before relying on it again. A mempool observer may front-run the same trigger; the expected security outcome is still lockdown, but submit privately when possible.
@@ -566,7 +570,7 @@
           <button class="secondary" id="buildDigest" title="Confirms the bytes identity is registered, recomputes the EIP-712 domain separator (and cross-checks the domain inputs against eip712Domain()), and shows the exact digest to sign. For Password it also stages the cleartext as the signature; for WebAuthn it prepares the challenge.">1 · Build digest / prepare</button>
         </div>
         <h3>Signature</h3>
-        <p class="small">ECDSA: the burner key signs the raw digest (no personal_sign prefix); a connected wallet signs the EIP-712 typed data (eth_signTypedData_v4, clear-signed). WebAuthn: the passkey signs the digest as its challenge. Password: the cleartext IS the signature (leaks over the mempool at submit; drilling leaks it over RPC).</p>
+        <p class="small">ECDSA: the burner key signs the raw digest (no personal_sign prefix); a connected wallet signs the EIP-712 typed data (eth_signTypedData_v4, clear-signed). WebAuthn: the passkey signs the digest as its challenge. Password: the cleartext IS the signature (leaks over the mempool at submit). Signatures are checked locally only: a valid signature is a live trigger credential, so never send it to an RPC (no eth_call drill).</p>
         <div class="grid">
           <label>Burner private key (ECDSA, signs locally, never sent)
             <input id="trigPrivKey" placeholder="0x... optional" type="password" />
@@ -578,7 +582,6 @@
             <select id="trigWebAuthnUV"><option value="preferred">preferred</option><option value="required">required (for REQUIRE_UV verifier)</option><option value="discouraged">discouraged</option></select>
           </label>
         </div>
-        <label style="margin-top:8px"><span><input type="checkbox" id="allowPasswordDrill" style="width:auto" /> I understand Password testSigner leaks the cleartext over RPC; allow password drill anyway</span></label>
         <div class="actions">
           <button class="secondary" id="signWithKey" title="ECDSA: signs the digest locally with the burner key (canonical low-s).">Sign with burner key (ECDSA)</button>
           <button class="secondary" id="signWithWallet" title="ECDSA: requests EIP-712 typed-data signing from the connected wallet. The signature must match the contract digest exactly; personal_sign / eth_sign are not used.">Sign with wallet (EIP-712)</button>
@@ -586,8 +589,8 @@
           <button class="secondary" id="usepastedSig" title="Uses the pasted signature: ECDSA is normalised; WebAuthn/Password are taken as-is.">Use pasted signature</button>
         </div>
         <div class="actions">
-          <button class="secondary" id="drillVerify" title="Read-only testSigner(signer, digest, signature): confirms the signature verifies WITHOUT burning the signer. Enables submit on success.">2 · Drill verify (no burn)</button>
-          <button class="warn" id="submitTrigger" disabled title="Submits triggerLockdown as a direct wallet call, then waits for confirmation and verifies LockedDown state. ECDSA/WebAuthn require a successful drill; production passwords may skip the drill to avoid an extra RPC disclosure.">3 · Submit triggerLockdown</button>
+          <button class="secondary" id="verifyLocally" title="Checks the signature in this browser only (ECDSA recover, WebAuthn P-256 via WebCrypto); nothing is sent to the RPC. Enables submit on success, or with a warning when the identity cannot be checked locally.">2 · Verify locally (no RPC)</button>
+          <button class="warn" id="submitTrigger" disabled title="Submits triggerLockdown as a direct wallet call, then waits for confirmation and verifies LockedDown state. ECDSA/WebAuthn require a passing (or explicitly unverifiable) local check; passwords are submit-ready once staged.">3 · Submit triggerLockdown</button>
           <button class="secondary" id="buildTriggerJson" title="Builds a direct-call relayer artifact. Never import it into Safe Wallet: the panic trigger must be submitted from an EOA or relayer, not by the Safe.">Build direct-call trigger artifact</button>
         </div>
         <div class="output"><pre id="triggerOut">No trigger action yet.</pre></div>
@@ -747,7 +750,7 @@
     const SAFE_MASTERCOPY_SLOT = "0x0000000000000000000000000000000000000000000000000000000000000000";
     const SENTINEL_MODULES = "0x0000000000000000000000000000000000000001";
     const SECP256K1_N_DIV_2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
-    const LOCKDOWN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("Lockdown(address safe,bytes32 reasonHash)"));
+    const LOCKDOWN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("Lockdown(address safe,bytes signer,bytes32 reasonHash)"));
     const DOMAIN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"));
 
     const NETWORKS = {
@@ -779,6 +782,8 @@
         "function eip712Domain() view returns (bytes1 fields,string name,string version,uint256 chainId,address verifyingContract,bytes32 salt,uint256[] extensions)",
         "function supportsInterface(bytes4 interfaceId) view returns (bool)",
         "function initialize(uint64 lockdownDuration,uint64 resumeDelay,address[] initialRecoveryOwners,bytes[] initialSigners)",
+        "function setErc1271Allowed(bool allowed)",
+        "function isErc1271Allowed(address safe) view returns (bool)",
         "function setLockdownDuration(uint64 newDuration)",
         "function setResumeDelay(uint64 newDelay)",
         "function addRecoveryOwner(address owner)",
@@ -796,7 +801,6 @@
         "function sweepExpiredOwnerTicket(address safe,bytes32 safeTxHash)",
         "function sweepExpiredModuleTicket(address safe,bytes32 moduleTxHash)",
         "function triggerLockdown(address safe,bytes32 reasonHash,bytes signer,bytes signature)",
-        "function testSigner(bytes signer,bytes32 hash,bytes signature) view returns (bool ok)",
         "function isLockdownSigner(address safe,bytes signer) view returns (bool)",
         "function isSignerBurntPermanently(address safe,bytes signer) view returns (bool)",
         "function isRecoveryOwner(address safe,address owner) view returns (bool)",
@@ -945,6 +949,60 @@
         ["bytes32", "bytes32", "uint256", "uint256", "bytes", "string"],
         [r, s, challengeIndex, typeIndex, authenticatorData, clientStr]
       );
+    }
+    // ---- Local (off-contract) signature checks ----
+    // A valid panic signature is a live trigger credential: anyone who sees it
+    // can submit it. These checks therefore run entirely in the browser and
+    // never send the signature to an RPC. They mirror what the bundled
+    // verifiers check on-chain (OZ WebAuthn.verify + P256.verify).
+    function base64Url(bytes) {
+      let bin = "";
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function bytesAt(haystack, index, needle) {
+      if (index + needle.length > haystack.length) return false;
+      for (let i = 0; i < needle.length; i++) if (haystack[index + i] !== needle[i]) return false;
+      return true;
+    }
+    // pubkeyHex = qx||qy (64 bytes), digestHex = the WebAuthn challenge,
+    // sigHex = the flat-encoded assertion produced by webauthnAssertion.
+    async function webauthnVerifyLocal(pubkeyHex, digestHex, sigHex) {
+      let r, s, challengeIndex, typeIndex, authenticatorData, clientStr;
+      try {
+        [r, s, challengeIndex, typeIndex, authenticatorData, clientStr] = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["bytes32", "bytes32", "uint256", "uint256", "bytes", "string"], sigHex);
+      } catch (_) {
+        return { ok: false, reason: "signature is not a flat-encoded WebAuthn assertion" };
+      }
+      const ad = ethers.getBytes(authenticatorData);
+      if (ad.length < 37) return { ok: false, reason: "authenticatorData is shorter than 37 bytes" };
+      const flags = { up: !!(ad[32] & 0x01), uv: !!(ad[32] & 0x04), be: !!(ad[32] & 0x08), bs: !!(ad[32] & 0x10) };
+      if (!flags.up) return { ok: false, flags, reason: "UP (user presence) flag is not set" };
+      if (flags.bs && !flags.be) return { ok: false, flags, reason: "BS flag set without BE (invalid backup state)" };
+      const client = new TextEncoder().encode(clientStr);
+      if (!bytesAt(client, Number(typeIndex), new TextEncoder().encode('"type":"webauthn.get"'))) {
+        return { ok: false, flags, reason: 'clientDataJSON has no "type":"webauthn.get" at typeIndex' };
+      }
+      const expectedChallenge = `"challenge":"${base64Url(ethers.getBytes(digestHex))}"`;
+      if (!bytesAt(client, Number(challengeIndex), new TextEncoder().encode(expectedChallenge))) {
+        return { ok: false, flags, reason: "challenge at challengeIndex is not this digest (signed for another Safe/reason/singleton?)" };
+      }
+      const rn = BigInt(r), sn = BigInt(s);
+      if (rn === 0n || rn >= P256_N || sn === 0n || sn > P256_N / 2n) {
+        return { ok: false, flags, reason: "r/s out of range or s not low (OZ P256 rejects high-s)" };
+      }
+      let key;
+      try {
+        key = await crypto.subtle.importKey("raw", ethers.getBytes(ethers.concat(["0x04", pubkeyHex])),
+          { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+      } catch (_) {
+        return { ok: false, flags, reason: "identity key is not a valid P-256 public key" };
+      }
+      const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", client));
+      const message = ethers.getBytes(ethers.concat([ad, clientHash]));
+      const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, ethers.getBytes(ethers.concat([r, s])), message);
+      return ok ? { ok: true, flags } : { ok: false, flags, reason: "P-256 signature does not verify against the identity key" };
     }
     function unixIso(ts) { return new Date(Number(ts) * 1000).toISOString(); }
     const STATE_NAMES = ["Uninitialised", "Normal", "LockedDown", "Recovering"];
@@ -1440,7 +1498,21 @@
         if (!lastInitializeData || lastInitializeData.safe.toLowerCase() !== safe.toLowerCase()) throw new Error("Build initialize() for this Safe in step 3 first (or uncheck include-initialize).");
         txs.push(builderTx(singleton, 0, lastInitializeData.data, null, null, 0));
       }
-      setLast(txBuilder(txs, includeInit ? "Install Lockdown v1.0.0 (setGuard + setModuleGuard + setFallbackHandler + initialize)" : "Install Lockdown v1.0.0 slots"), { action: "install", safe, singleton, fallbackHandler, rollbackSnapshotChecksum: rollbackSnapshot.checksum, atomic: "Safe{Wallet} batches these into one execTransaction (MultiSend), so no asymmetric intermediate state is observable.", lifecycle: "Installed/initialised is not the same as armed. Configure signers, timelock and bypassers in separate reviewed transactions, then verify on-chain.", includeInitialize: includeInit });
+      // SPEC_V1 H.27: optional ERC-1271 opt-in. The setter is onlyNormal, so it
+      // must follow initialize in the same batch (or the Safe must already be
+      // initialised). Disabled by default: nothing is added unless ticked.
+      const allowErc1271 = $("installAllowErc1271").checked;
+      const plannedDelay = $("initTimelockDelay").value.trim();
+      const installWarnings = [];
+      if (allowErc1271 && plannedDelay && plannedDelay !== "0") installWarnings.push(`ERC-1271 accepted while a timelockDelay of ${plannedDelay}s is planned: an off-chain signature settles with no timelock window (NM-1060 6.1 re-opened by choice, SPEC_V1 H.27 / AR-15).`);
+      if (allowErc1271) {
+        if (!includeInit && !alreadyInit) throw new Error("setErc1271Allowed(true) needs an initialised Safe: include initialize() or untick the ERC-1271 opt-in.");
+        txs.push(builderTx(singleton, 0, iface.lockdown.encodeFunctionData("setErc1271Allowed", [true]), method("setErc1271Allowed", [{ name: "allowed", type: "bool", internalType: "bool" }]), { allowed: true }, 0));
+      }
+      const parts = ["setGuard", "setModuleGuard", "setFallbackHandler"];
+      if (includeInit) parts.push("initialize");
+      if (allowErc1271) parts.push("setErc1271Allowed(true)");
+      setLast(txBuilder(txs, includeInit || allowErc1271 ? `Install Lockdown v1.0.0 (${parts.join(" + ")})` : "Install Lockdown v1.0.0 slots"), { action: "install", safe, singleton, fallbackHandler, rollbackSnapshotChecksum: rollbackSnapshot.checksum, atomic: "Safe{Wallet} batches these into one execTransaction (MultiSend), so no asymmetric intermediate state is observable.", lifecycle: "Installed/initialised is not the same as armed. Configure signers, timelock and bypassers in separate reviewed transactions, then verify on-chain.", includeInitialize: includeInit, allowErc1271, warnings: installWarnings });
     }
     async function buildRemoveGuards() {
       const ctx = await verifyRollbackContext(1);
@@ -1538,11 +1610,27 @@
     }
 
     // ============================ 6 TIMELOCK ============================
+    // SPEC_V1 H.27: activating the timelock does not touch the ERC-1271 flag
+    // on-chain, and once the delay is active changing the flag waits that
+    // delay. The helper therefore puts the ERC-1271 choice in the same batch as
+    // setTimelockDelay: at delay 0 the guard checks the batch once, so both
+    // calls land atomically and for free. The contract stays policy-free.
     function buildSetTimelock() {
       const singleton = requireAddress($("tlSingleton").value, "singleton");
       const delay = numeric($("tlDelay").value, "timelock delay");
-      const data = iface.lockdown.encodeFunctionData("setTimelockDelay", [delay]);
-      setLast(txBuilder([builderTx(singleton, 0, data, method("setTimelockDelay", [{ name: "newDelay", type: "uint64", internalType: "uint64" }]), { newDelay: delay.toString() })], "setTimelockDelay"), { action: "setTimelockDelay", singleton, newDelay: delay.toString(), note: delay === 0n ? "Turning the timelock OFF is itself timelocked once active (only the first 0->N is free)." : "First 0->N activation is free; later changes are scheduled + waited." });
+      const erc1271 = $("tlErc1271").value;
+      const txs = [];
+      const warnings = [];
+      if (erc1271 !== "unchanged") {
+        const allowed = erc1271 === "on";
+        txs.push(builderTx(singleton, 0, iface.lockdown.encodeFunctionData("setErc1271Allowed", [allowed]), method("setErc1271Allowed", [{ name: "allowed", type: "bool", internalType: "bool" }]), { allowed }, 0));
+        if (allowed && delay > 0n) warnings.push(`ERC-1271 kept on with a timelockDelay of ${delay}s: an off-chain signature settles with no timelock window (NM-1060 6.1 re-opened by choice, SPEC_V1 H.27 / AR-15).`);
+      } else if (delay > 0n) {
+        warnings.push("ERC-1271 left unchanged: if the Safe opted in earlier, activating the timelock keeps it on and an off-chain signature settles with no timelock window (NM-1060 6.1, SPEC_V1 H.27 / AR-15).");
+      }
+      txs.push(builderTx(singleton, 0, iface.lockdown.encodeFunctionData("setTimelockDelay", [delay]), method("setTimelockDelay", [{ name: "newDelay", type: "uint64", internalType: "uint64" }]), { newDelay: delay.toString() }));
+      const name = txs.length > 1 ? `setErc1271Allowed(${erc1271 === "on"}) + setTimelockDelay` : "setTimelockDelay";
+      setLast(txBuilder(txs, name), { action: "setTimelockDelay", singleton, newDelay: delay.toString(), erc1271, warnings, note: delay === 0n ? "Turning the timelock OFF is itself timelocked once active (only the first 0->N is free)." : "First 0->N activation is free and the batch lands atomically; once the timelock is active, the whole batch is scheduled + waited." });
     }
     function buildSetBypasser() {
       const singleton = requireAddress($("tlSingleton").value, "singleton");
@@ -1694,8 +1782,9 @@
         [DOMAIN_TYPEHASH, ethers.keccak256(ethers.toUtf8Bytes("RuntimeLockdown")), ethers.keccak256(ethers.toUtf8Bytes(SINGLETON_VERSION)), BigInt($("chainId").value), singleton]
       ));
     }
-    function lockdownDigest(domainSep, safe, reasonHash) {
-      const structHash = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "address", "bytes32"], [LOCKDOWN_TYPEHASH, safe, reasonHash]));
+    function lockdownDigest(domainSep, safe, identity, reasonHash) {
+      // EIP-712 encodes a dynamic `bytes` field as its keccak256.
+      const structHash = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes32", "address", "bytes32", "bytes32"], [LOCKDOWN_TYPEHASH, safe, ethers.keccak256(identity), reasonHash]));
       return ethers.keccak256(ethers.concat(["0x1901", domainSep, structHash]));
     }
     async function buildDigest() {
@@ -1721,7 +1810,7 @@
       if (BigInt(dom.chainId) !== BigInt($("chainId").value)) mismatches.push(`chainId ${dom.chainId} != ${$("chainId").value}`);
       if (dom.verifyingContract.toLowerCase() !== singleton.toLowerCase()) mismatches.push(`verifyingContract ${dom.verifyingContract} != ${singleton}`);
       if (mismatches.length) throw new Error(`EIP-712 domain mismatch: ${mismatches.join("; ")}. Wrong chainId/singleton/version - do not sign.`);
-      const digest = lockdownDigest(localDomain, safe, reasonHash);
+      const digest = lockdownDigest(localDomain, safe, identity, reasonHash);
       triggerCtx = { type, safe, singleton, verifier, identity, reasonHash, digest, chainId: String(dom.chainId), signature: null };
       $("submitTrigger").disabled = true;
       const out = { step: "digest-built", scheme: type, safe, verifier, identity, reasonHash, domainSeparator: localDomain, domainOnChainOk: true, digestToSign: digest };
@@ -1731,12 +1820,12 @@
         if (!pwd) throw new Error("Enter the panic password.");
         triggerCtx.signature = ethers.hexlify(ethers.toUtf8Bytes(pwd));
         $("submitTrigger").disabled = false;
-        out.next = "Password staged as signature. Submit is enabled WITHOUT drill. Do not run testSigner on a production password unless you intentionally accept the RPC leak.";
-        out.warning = "PasswordVerifier: cleartext is broadcast at submit and leaks over RPC if drilled. Single-use, frontrunnable.";
+        out.next = "Password staged as signature. Submit is enabled (the password is the registered commitment preimage; there is nothing further to check locally).";
+        out.warning = "PasswordVerifier: cleartext is broadcast at submit. Single-use, frontrunnable.";
       } else if (type === "webauthn") {
-        out.next = "Sign with passkey (WebAuthn): the digest above is the challenge. Then drill.";
+        out.next = "Sign with passkey (WebAuthn): the digest above is the challenge. Then verify locally.";
       } else {
-        out.next = "Sign the digest (burner key / wallet / paste). Then drill.";
+        out.next = "Sign the digest (burner key / wallet / paste). Then verify locally.";
       }
       log("triggerOut", out);
     }
@@ -1751,14 +1840,14 @@
       const ctx = requireDigest();
       ctx.signature = serialized;
       const matchesKey = recovered.toLowerCase() === ethers.getAddress(ctx.identity).toLowerCase();
-      $("submitTrigger").disabled = true; // re-enabled only by a successful drill
-      log("triggerOut", { step: "signed", source, signature: serialized, recovered, matchesPanicKey: matchesKey, warning: matchesKey ? undefined : "Recovered address does not match the panic key - the signature will fail verification.", next: "Run the drill (testSigner)." });
+      $("submitTrigger").disabled = true; // re-enabled only by the local check
+      log("triggerOut", { step: "signed", source, signature: serialized, recovered, matchesPanicKey: matchesKey, warning: matchesKey ? undefined : "Recovered address does not match the panic key - the signature will fail verification unless the identity is an ERC-1271 wallet that accepts it.", next: "Verify locally." });
     }
     function setRawSignature(sig, source, extra) {
       const ctx = requireDigest();
       ctx.signature = sig;
       $("submitTrigger").disabled = true;
-      log("triggerOut", { step: "signed", source, signature: sig, ...(extra || {}), next: "Run the drill (testSigner)." });
+      log("triggerOut", { step: "signed", source, signature: sig, ...(extra || {}), next: "Verify locally." });
     }
     function signWithKey() {
       const ctx = requireDigest();
@@ -1788,8 +1877,8 @@
         chainId: BigInt($("chainId").value),
         verifyingContract: ctx.singleton
       };
-      const types = { Lockdown: [{ name: "safe", type: "address" }, { name: "reasonHash", type: "bytes32" }] };
-      const raw = await signer.signTypedData(domain, types, { safe: ctx.safe, reasonHash: ctx.reasonHash });
+      const types = { Lockdown: [{ name: "safe", type: "address" }, { name: "signer", type: "bytes" }, { name: "reasonHash", type: "bytes32" }] };
+      const raw = await signer.signTypedData(domain, types, { safe: ctx.safe, signer: ctx.identity, reasonHash: ctx.reasonHash });
       const n = normalizeSignature(raw);
       if (n.recovered.toLowerCase() !== account.toLowerCase()) {
         throw new Error(`Signed address ${n.recovered} != connected wallet ${account}. Wrong account or domain.`);
@@ -1814,23 +1903,54 @@
         setRawSignature(raw, `pasted (${ctx.type})`);
       }
     }
-    async function drillVerify() {
+    const OFF_CONTRACT_DRILL = "Run the off-contract Foundry drill script/DrillSigner.s.sol against a local fork (anvil --fork-url ...): it simulates the exact on-chain check without broadcasting the signature.";
+    // Replaces the former on-chain testSigner drill. Only state reads that do
+    // not carry the signature (eth_getCode) may reach the RPC.
+    async function verifyLocally() {
       const ctx = requireDigest();
       if (!ctx.signature) throw new Error("Produce a signature first.");
-      if (ctx.type === "password" && !$("allowPasswordDrill").checked) {
-        throw new Error("Password drill disabled: testSigner would leak the cleartext over RPC. Tick the explicit checkbox only for throwaway passwords.");
+      let result;
+      if (ctx.type === "password") {
+        result = { verdict: "pass", detail: "Password is the registered commitment preimage; nothing further to check." };
+      } else if (ctx.type === "ecdsa") {
+        // Mirror OZ SignatureChecker: any code at the identity (ERC-1271 wallet or
+        // EIP-7702 delegation) selects the isValidSignature branch, so a matching
+        // ecrecover proves nothing there. Check code first.
+        let recovered = null;
+        try { recovered = ethers.recoverAddress(ctx.digest, ctx.signature); } catch (_) {}
+        const code = await getReadProvider().getCode(ctx.identity);
+        if (code && code !== "0x") {
+          result = { verdict: "unverifiable", detail: `Identity ${ctx.identity} has code (ERC-1271 wallet or EIP-7702 account), so acceptance depends on its isValidSignature, not on ecrecover (recovers to ${recovered || "nothing"}). ${OFF_CONTRACT_DRILL}` };
+        } else if (recovered && recovered.toLowerCase() === ctx.identity.toLowerCase()) {
+          result = { verdict: "pass", detail: `ECDSA signature recovers to the code-less identity ${recovered}.` };
+        } else {
+          result = { verdict: "fail", detail: `Identity ${ctx.identity} has no code (plain EOA) and the signature recovers to ${recovered || "nothing"}: it will be rejected.` };
+        }
+      } else if (ctx.type === "webauthn") {
+        const key = ethers.dataSlice(ctx.identity, 20);
+        const w = await webauthnVerifyLocal(key, ctx.digest, ctx.signature);
+        if (w.ok) {
+          result = { verdict: "pass", flags: w.flags, detail: "P-256 assertion verifies locally against the identity key and this digest.", note: "Assumes the identity's verifier is the pinned bundled WebAuthn verifier." + (w.flags.uv ? "" : " UV flag is NOT set: a UV-required WebAuthnVerifier will reject it; WebAuthnVerifierNoUV accepts it.") };
+        } else {
+          result = { verdict: "fail", flags: w.flags, detail: w.reason };
+        }
+      } else {
+        result = { verdict: "unverifiable", detail: `Scheme ${ctx.type} cannot be checked locally. ${OFF_CONTRACT_DRILL}` };
       }
-      const ld = new ethers.Contract(ctx.singleton, ABI.lockdown, getReadProvider());
-      const ok = await ld.testSigner(ctx.identity, ctx.digest, ctx.signature);
-      $("submitTrigger").disabled = !ok;
-      log("triggerOut", { step: "drill", ok, verdict: ok ? "PASS - signature verifies WITHOUT burning. Submit is enabled." : "FAIL - signature does not verify. Re-sign or check the identity/digest.", scheme: ctx.type, identity: ctx.identity, warning: ctx.type === "password" ? "Password drill leaked the cleartext over RPC. Treat this password as compromised after a drill; rotate before real use." : undefined });
+      $("submitTrigger").disabled = result.verdict === "fail";
+      const verdictText = {
+        pass: "PASS - verified locally; the signature was not sent anywhere. Submit is enabled.",
+        unverifiable: "UNVERIFIED - cannot be checked locally. Submit is enabled; prefer the off-contract drill first.",
+        fail: "FAIL - the signature will not verify. Re-sign or check the identity/digest."
+      }[result.verdict];
+      log("triggerOut", { step: "local-verify", ...result, status: result.verdict, verdict: verdictText, scheme: ctx.type, identity: ctx.identity, warning: result.verdict === "unverifiable" ? OFF_CONTRACT_DRILL : undefined });
     }
     function triggerCalldata(ctx) {
       return iface.lockdown.encodeFunctionData("triggerLockdown", [ctx.safe, ctx.reasonHash, ctx.identity, ctx.signature]);
     }
     async function submitTrigger() {
       const ctx = requireDigest();
-      if (!ctx.signature) throw new Error("Produce a signature and pass the drill first.");
+      if (!ctx.signature) throw new Error("Produce a signature and verify it locally first.");
       if (!signer) await connect();
       const walletNetwork = await signer.provider.getNetwork();
       if (String(walletNetwork.chainId) !== ctx.chainId || String($("chainId").value).trim() !== ctx.chainId) {
@@ -2080,6 +2200,28 @@
     function goTo(id) { window.location.hash = id; $(id).scrollIntoView({ behavior: "smooth", block: "start" }); }
 
     $("networkPreset").addEventListener("change", applyNetworkPreset);
+    // SPEC_V1 H.27: the contract default is ERC-1271 off. The install helper
+    // proposes the normal Safe behaviour (on) when no timelock is planned, and
+    // the hardening (off) when one is: an off-chain signature never gets a
+    // timelock window. The operator can still override the box either way.
+    function syncErc1271Default() {
+      const delay = $("initTimelockDelay").value.trim();
+      const hardened = Boolean(delay) && delay !== "0";
+      $("installAllowErc1271").checked = !hardened;
+      $("installErc1271Hint").textContent = hardened
+        ? `Pre-unticked: a timelockDelay of ${delay}s is planned in step 3, and an off-chain signature would settle with no timelock window (NM-1060 6.1).`
+        : "Pre-ticked: no timelock planned in step 3, so the Safe keeps a normal Safe's ability to sign messages.";
+    }
+    $("initTimelockDelay").addEventListener("input", syncErc1271Default);
+    syncErc1271Default();
+    // Step 6 default: switching the timelock on proposes ERC-1271 off in the
+    // same batch; switching it off leaves the flag alone. Overridable.
+    function syncTimelockErc1271Default() {
+      const delay = $("tlDelay").value.trim();
+      $("tlErc1271").value = Boolean(delay) && delay !== "0" ? "off" : "unchanged";
+    }
+    $("tlDelay").addEventListener("input", syncTimelockErc1271Default);
+    syncTimelockErc1271Default();
     $("deployWebAuthnRequireUV").addEventListener("change", () => {
       if (!loadedManifest) return;
       $("expWebAuthnVerifierCodehash").value = "";
@@ -2128,7 +2270,7 @@
     bind("signWithWallet", signWithWallet);
     bind("signWithPasskey", signWithPasskey);
     bind("usepastedSig", usePastedSig);
-    bind("drillVerify", drillVerify);
+    bind("verifyLocally", verifyLocally);
     bind("submitTrigger", submitTrigger);
     bind("buildTriggerJson", buildTriggerJson);
     bind("readState", readState);

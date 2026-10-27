@@ -12,7 +12,9 @@ authoritative.
 > `bytes` value. A signer is either a 20-byte EOA/ERC-1271 address or
 > `verifier || key`; verification is delegated to OpenZeppelin
 > `SignatureChecker.isValidSignatureNow(bytes,bytes32,bytes)`. The EIP-712
-> trigger message is now `Lockdown(address safe,bytes32 reasonHash)`.
+> trigger message is now `Lockdown(address safe,bytes signer,bytes32 reasonHash)`
+> (the `signer` field was added later to bind each signature to the
+> identity that submits it).
 > `signerId`, `nextSignerId`, `idToLookupKey`, `getSignerById`,
 > `getSignersByIdRange`, and the local `ECDSAVerifier` have been removed.
 > The normative sections (§1-§13) below have been aligned with this model.
@@ -48,7 +50,7 @@ reference the relevant section number from this spec.
 | 3 | **ERC-7913 identity dispatch**: every signer is a `bytes` identity (a 20-byte EOA/ERC-1271 address, or `verifier \|\| key`). Verification is delegated to OpenZeppelin `SignatureChecker.isValidSignatureNow(signer, hash, signature)`, which routes 20-byte identities to ECDSA/ERC-1271 and longer identities to `IERC7913SignatureVerifier(verifier).verify(key, hash, signature)` (checking the `bytes4` magic value 0x024ad318). | Multi-scheme extensibility (ECDSA, WebAuthn, BLS, post-quantum, threshold...) without re-deploying the singleton. EIP-7913 is the emerging Ethereum standard for non-EOA signer abstractions. The magic-value pattern (like ERC-1271) prevents accidental "every-signature-valid" verifiers. |
 | 4 | **No verifier-class allowlist**: verifier trust is attached to each explicit signer identity. | Removes a second authorization plane and its bulk kill-switch semantics. A compromised verifier is cleaned up by removing the affected signer identities, which the Safe can batch through MultiSend. |
 | 5 | **Single-use signer semantics**: every successful `triggerLockdown()` burns (removes + permanently blocks) the signer identity that authorised the call. | Eliminates mempool replay (the exact identity is burnt on success) and cross-registration replay (a re-registered identity is permanently blocked, INV-SIGN-7). Matches the operational use case "rare panic event, rotate after each". |
-| 6 | **EIP-712 typed-data binding**: the signed message is `Lockdown(address safe, bytes32 reasonHash)`, bound to the verifying contract and chain id via the OZ EIP-712 domain. | Cross-Safe replay-safe: a signature for Safe A is a different digest from Safe B. Replay across re-registrations of the same key material is prevented instead by single-use burn + the permanent burnt-identity register (INV-SIGN-7), not by a counter in the message. Clear-signing friendly on modern wallets. |
+| 6 | **EIP-712 typed-data binding**: the signed message is `Lockdown(address safe, bytes signer, bytes32 reasonHash)`, bound to the verifying contract and chain id via the OZ EIP-712 domain. | Cross-Safe replay-safe: a signature for Safe A is a different digest from Safe B. Cross-identity replay-safe: the `signer` field binds the signature to the exact identity bytes presented to `triggerLockdown`, so a signature produced for one registered identity cannot be submitted under another identity whose verifier would also accept it (e.g. two ERC-1271 wallets sharing an owner key, or two `verifier || key` entries sharing key material). This binding only reaches verifiers that check the digest; `PasswordVerifier` ignores it (§H.23). Replay across re-registrations of the same key material is prevented instead by single-use burn + the permanent burnt-identity register (INV-SIGN-7), not by a counter in the message. Clear-signing friendly on modern wallets. |
 | 7 | **Slot installation + baseline initialization are atomic; policy configuration is staged**: `initialize(...)` still accepts optional `initialSigners[]`, but the recommended v1.0.0 flow leaves them empty and provisions signers, timelock, and bypassers in later, independently reviewed Safe transactions. | The three Safe slots must never be observably half-wired. Separate policy transactions produce a deliberate dormant setup window, so operators must not resume normal use or call the Safe armed until signer/timelock verification is complete. The optional atomic signer path remains available when a deployment policy explicitly prefers zero dormant window. |
 | 8 | **State unified**: `getState(safe)` derives the lifecycle state from `lockdownDuration`, `lockdownUntil`, and `resumeDelay` (single source of truth). | `lockdownDuration == 0` ⟹ Uninitialised; `lockdownUntil == 0` ⟹ Normal; `< lockdownUntil` ⟹ LockedDown; `< lockdownUntil + resumeDelay` ⟹ Recovering; else Normal (auto-resume once the recovery window elapses). No redundant state field to keep in sync. Auto-resume itself performs no storage write, so the elapsed incident fields can linger. A later Normal-state `setResumeDelay` clears them before writing the new delay, preventing a configuration change from resurrecting the old recovery window. Public getters always normalise an elapsed incident to `Normal` / `0` / `bytes32(0)`. |
 | 9 | **No upgradeability**, no admin, no pauser, no emergency owner. Each version is its own immutable singleton. Migration = new singleton + per-Safe `setGuard`. **It cannot be atomic (correction, pre-tag review 2026-08-25): it takes exactly TWO owner transactions with an unavoidable fail-open window between them** - the old singleton's pre-hook requires any new fallback handler to be bound to ITSELF, while the new singleton's `initialize` requires all three slots to point at the NEW one, a contradiction inside one transaction. See §8 and `test/poc/SafeIntegrationLifecycle.t.sol`. | Audit corpus stays small and self-contained. |
@@ -86,11 +88,12 @@ singleton-multi-Safe isolation):
 | `StateMachine` | abstract | `SafeConfig` (`resumeDelay`, `lockdownDuration`, `lockdownUntil`, `lockdownReasonHash`) in `_configs` | Derives the 4 lifecycle states (`getState`, decision #8) and exposes the `onlyUninitialised` / `onlyInitialized` / `onlyNormal` / `onlyNotLockedDown` gates. Single source of truth for the lifecycle scalars. |
 | `LockdownSigners` | abstract | `_signers` (`EnumerableSet.BytesSet`) + `_burnt` register | ERC-7913 signer registration / removal / rotation, single-use burn-on-trigger, and the permanent burnt-identity block (INV-SIGN-7). |
 | `RecoveryOwners` | abstract | `_owners` (`EnumerableSet.AddressSet`) | The recovery-owner allowlist and the exact-length `swapOwner` target validation used by the recovery whitelist (H.19). |
-| `Lockdown` | concrete base | composes the three components + `EIP712` | Both guard hooks (owner-path `checkTransaction`, module-path `checkModuleTransaction`), the EIP-712 `triggerLockdown`, MultiSend-batch parsing, and the recovery whitelist. A complete, deployable lockdown primitive with NO timelock. |
+| `Erc1271Policy` | abstract | `_erc1271Allowed` (`bool`) | The per-Safe ERC-1271 opt-in read by `LockdownFallbackHandler` (H.27). Outside the lockdown lifecycle: no incident transition reads or writes it. |
+| `Lockdown` | concrete base | composes the four components + `EIP712` | Both guard hooks (owner-path `checkTransaction`, module-path `checkModuleTransaction`), the EIP-712 `triggerLockdown`, MultiSend-batch parsing, and the recovery whitelist. A complete, deployable lockdown primitive with NO timelock. |
 | `Timelock` | mixin | `_timelockConfigs` (`SafeTimelockConfig`) | Per-Safe timelock: owner-path `scheduleTransaction`, module-path `scheduleModuleTransaction`, `cancel*`, `bypassTimelock`, tickets (`executableAt`), TTL `sweep`, and the bypasser allowlist. Self-contained; holds no lockdown state. |
 | `LockdownTimelock` | concrete singleton | composes `Lockdown` + `Timelock` | The V1 deployment target. Overrides the guard hooks to fold the timelock schedule / wait / bypass checks into the Normal state, and re-applies the lifecycle gates as overrides. |
 
-The split keeps the lockdown core (`Lockdown` plus its three components) a
+The split keeps the lockdown core (`Lockdown` plus its four components) a
 complete deployable contract that can be reviewed on its own, with the
 timelock layered on top only in `LockdownTimelock`.
 
@@ -111,7 +114,7 @@ uint256 public constant MAX_LOCKDOWN_SIGNERS  = 32;
 uint256 public constant MAX_KEY_LENGTH        = 256;
 
 bytes32 public constant LOCKDOWN_TYPEHASH =
-    keccak256("Lockdown(address safe,bytes32 reasonHash)");
+    keccak256("Lockdown(address safe,bytes signer,bytes32 reasonHash)");
 ```
 
 The whitelist selectors are NOT public constants in the implementation: the
@@ -132,9 +135,10 @@ The logical per-Safe state is presented below as one struct for readability.
 The implementation splits it across four `private` per-component mappings,
 each keyed by the Safe address: `StateMachine._configs` (the four lifecycle
 scalars, with `lockdownReasonHash` as the field name for `lastReasonHash`),
-`LockdownSigners._signers` / `_burnt`, `RecoveryOwners._owners`, and
+`LockdownSigners._signers` / `_burnt`, `RecoveryOwners._owners`,
+`Erc1271Policy._erc1271Allowed` (the H.27 opt-in flag), and
 `Timelock._timelockConfigs`. The INV-ISO-1 slot-derivation review must be
-done against those four mappings, not against a single monolithic struct.
+done against those five mappings, not against a single monolithic struct.
 
 ```solidity
 struct SafeConfig {
@@ -204,7 +208,7 @@ unconfigured Safe is `Uninitialised` and the hooks pass through.
 Transitions:
 
 - `Uninitialised → Normal`: the Safe self-calls `initialize(...)` (sets `lockdownDuration > 0`).
-- `Normal → LockedDown`: any registered signer produces a valid `triggerLockdown(...)` call (sets `lockdownUntil = now + lockdownDuration`).
+- `Normal → LockedDown`: any registered signer produces a valid `triggerLockdown(...)` call (sets `lockdownUntil = max(now, lockdownUntil) + lockdownDuration`; from Normal this is `now + lockdownDuration`).
 - `LockedDown → Recovering`: time elapses; `block.timestamp >= lockdownUntil`.
 - `Recovering → Normal`: time elapses; `block.timestamp >= lockdownUntil + resumeDelay`. This transition is **purely time-based (auto-resume)**: no transaction, no event, and therefore no storage write. The elapsed incident fields remain until a later `_lock` overwrites them or a Normal-state `setResumeDelay` clears them before applying a prospective delay. There is no explicit resume call.
 
@@ -253,16 +257,21 @@ function triggerLockdown(
     // Preserve the cheap Unknown rejection before verifier dispatch.
     require(isLockdownSigner(safe, signer), LockdownSigners_Unknown());
 
-    // testSigner is the single verification path for drills and triggers.
-    bytes32 digest =
-        _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe, reasonHash)));
-    require(testSigner(signer, digest, signature), BadSignature());
+    // No on-chain drill view exists: verification happens only here, where a
+    // valid signature always burns the signer (see §6.4 / H.17).
+    // `_hashLockdownTrigger` is shared with the `hashLockdownTrigger` view
+    // (§6.4, H.29), so the published digest and the verified one cannot diverge:
+    //   _hashTypedDataV4(keccak256(abi.encode(
+    //       LOCKDOWN_TYPEHASH, safe, keccak256(signer), reasonHash)))
+    bytes32 digest = _hashLockdownTrigger(safe, signer, reasonHash);
+    require(SignatureChecker.isValidSignatureNow(signer, digest, signature), BadSignature());
 
     // Verify first, then remove and permanently burn, then lock.
     _removeLockdownSigner(safe, signer);
 
     SafeConfig storage cfg = _configs[safe];
-    uint64 until = uint64(block.timestamp) + cfg.lockdownDuration;
+    // Stack on an active window instead of restarting it from `now`.
+    uint64 until = uint64(Math.max(uint64(block.timestamp), cfg.lockdownUntil)) + cfg.lockdownDuration;
     cfg.lockdownUntil = until;
     cfg.lastReasonHash = reasonHash;
     emit SafeLockedDown(safe, until, reasonHash, signer);
@@ -283,7 +292,7 @@ revert / short / non-magic return maps to `BadSignature`.
 Notes:
 
 - There is no verifier-class allowlist. An identity is authorised only if it is currently registered in `signers`.
-- Signature verification runs before any signer mutation and delegates to the public `testSigner` source of truth. A registered-identity pre-check preserves the cheap `LockdownSigners_Unknown` rejection. After successful verification, the shared removal helper removes and permanently burns the identity before `_lock`; any later revert rolls the whole sequence back atomically (INV-SIGN-1).
+- Signature verification runs before any signer mutation, inline via `SignatureChecker.isValidSignatureNow`. There is deliberately no public view that verifies a trigger signature without burning the signer (§6.4). A registered-identity pre-check preserves the cheap `LockdownSigners_Unknown` rejection. After successful verification, the shared removal helper removes and permanently burns the identity before `_lock`; any later revert rolls the whole sequence back atomically (INV-SIGN-1).
 - The burn marks the identity permanently (`signerBurntPermanently[signer]`, INV-SIGN-7): it can never be re-registered, even after resume.
 - `SignatureChecker` dispatches the verifier via STATICCALL, so a malicious verifier cannot reenter or mutate state.
 
@@ -299,8 +308,9 @@ The table is written against a 20-byte ECDSA/ERC-1271 identity (verified directl
 | Signer identity removed after signature created | No | `triggerLockdown` requires the exact registered identity; removal reverts `LockdownSigners_Unknown` at trigger time. |
 | Re-registration of the same identity after burn | No | A burnt identity can never be re-registered (`LockdownSigners_BurntPermanently`, INV-SIGN-7); a fresh identity must be used. The old signature authorises an identity that no longer exists. |
 | Cross-Safe replay (same signer key registered on a second Safe) | No | The EIP-712 `safe` field is in the typed-data digest, so a signature for Safe A is a different digest from the equivalent signature for Safe B. |
+| Cross-identity replay (same key wrapped by a second identity on the same Safe, e.g. one passkey under `WebAuthnVerifier` and `WebAuthnVerifierNoUV`) | No | The EIP-712 `signer` field is in the typed-data digest, so each identity verifies a different digest (§H.23). |
 
-Note on verifiers that ignore the EIP-712 message hash (e.g. a preimage-of-commitment "password" verifier): such verifiers have no protection beyond the burn. A preimage revealed in a reverted-before-burn trigger, or a commitment registered on multiple Safes, becomes replayable. V1 ships `PasswordVerifier` as a tier-2 last-resort production primitive with hard operator obligations, not as the default signing path. See Hardening log §H.18 and the T-PWD-* risks.
+Note on verifiers that ignore the EIP-712 message hash (e.g. a preimage-of-commitment "password" verifier): such verifiers have no protection beyond the burn. A preimage revealed in a reverted-before-burn trigger, or a commitment registered on multiple Safes or under more than one identity on the same Safe (T-PWD-MULTI-IDENTITY, §H.23), becomes replayable. V1 ships `PasswordVerifier` as a tier-2 last-resort production primitive with hard operator obligations, not as the default signing path. See Hardening log §H.18 and the T-PWD-* risks.
 
 ## 6. External interface
 
@@ -321,6 +331,7 @@ function initialize(
 
 function setLockdownDuration(uint64 newDuration) external;
 function setResumeDelay(uint64 newDelay) external;
+function setErc1271Allowed(bool allowed) external;   // H.27, default false
 function addRecoveryOwner(address owner) external;
 function removeRecoveryOwner(address owner) external;
 
@@ -334,7 +345,7 @@ There is no `resumeAfterLockdownPeriodExpired()`: the Safe auto-resumes to
 
 #### Semantics
 
-Scalar/config admin setters (`setLockdownDuration`, `setResumeDelay`, `addRecoveryOwner`, `removeRecoveryOwner`, `addLockdownSigner`, `rotateLockdownSigner`) are gated by `onlyNormal` and revert `InvalidState` unless `_configs[msg.sender]` is in the `Normal` state (in particular they revert when uninitialised, `lockdownDuration == 0`). `removeLockdownSigner` is intentionally broader (`onlyNotLockedDown`) so recovery can neutralise compromised panic identities. Admin setters cannot create the lifecycle sentinel; only `initialize` can. This prevents the pre-`initialize` self-call sequence (`setLockdownDuration(...) → initialize(...)`) that would otherwise brick the Safe, because `initialize`'s `onlyUninitialised` gate would then reject step 2 (the sentinel is already set).
+Scalar/config admin setters (`setLockdownDuration`, `setResumeDelay`, `setErc1271Allowed`, `addRecoveryOwner`, `removeRecoveryOwner`, `addLockdownSigner`, `rotateLockdownSigner`) are gated by `onlyNormal` and revert `InvalidState` unless `_configs[msg.sender]` is in the `Normal` state (in particular they revert when uninitialised, `lockdownDuration == 0`). `removeLockdownSigner` is intentionally broader (`onlyNotLockedDown`) so recovery can neutralise compromised panic identities. Admin setters cannot create the lifecycle sentinel; only `initialize` can. This prevents the pre-`initialize` self-call sequence (`setLockdownDuration(...) → initialize(...)`) that would otherwise brick the Safe, because `initialize`'s `onlyUninitialised` gate would then reject step 2 (the sentinel is already set).
 
 **`initialize`**: one-shot, gated by `onlyUninitialised` (reverts `InvalidState` if `_configs[msg.sender].lockdownDuration != 0`). Enforces:
 - `lockdownDuration ∈ [LOCKDOWN_DURATION_MIN, LOCKDOWN_DURATION_MAX]` (1 h floor, INV-LIVE-3 / T-LIVE-2)
@@ -366,6 +377,8 @@ On success: adds the identity to `signers` and emits `LockdownSignerAdded(safe, 
 **`rotateLockdownSigner(oldSigner, newSigner)`**: Safe-gated, `onlyNormal`. Atomic remove + add: removes (and burns) `oldSigner`, then adds `newSigner`. The two identities may be of different shapes (e.g. rotate from a `verifier || key` password identity to a 20-byte ECDSA identity in one tx). Reverts as for both component operations. Emits `LockdownSignerRemoved(safe, oldSigner)` + `LockdownSignerAdded(safe, newSigner)` + `LockdownSignerRotated(safe, oldSigner, newSigner)`. The `Rotated` event lets watchers correlate the two without parsing the full event stream.
 
 **`setLockdownDuration` / `setResumeDelay`**: same bounds as `initialize`. Normal only.
+
+**`setErc1271Allowed(bool allowed)`** (H.27): owner-path Safe self-call, `onlyNormal`. Writes `erc1271Allowed` for `msg.sender` and emits `Erc1271AllowedChanged(safe, allowed)` on every call (also when the value is unchanged). `false`, the storage default, means the `LockdownFallbackHandler` refuses ERC-1271 with `Erc1271Disabled`. It cannot be set before `initialize` (`InvalidState`), but an install MultiSend may carry it right after `initialize`. It is NOT a timelock meta-call, so on `LockdownTimelock` with `timelockDelay > 0` both enabling and disabling must be scheduled and wait the delay (or be submitted by a registered bypasser). Modules cannot reach it (`ModuleCallToSingletonDenied`), and it is not on the recovery whitelist.
 
 **`addRecoveryOwner(owner)` / `removeRecoveryOwner(owner)`**: Normal only (rejected during incident: blocks the pre-signed "add attacker as recovery owner" attack). `removeRecoveryOwner` cannot drop the allowlist count to 0 (`RecoveryOwners_EmptyAllowlist` revert). `addRecoveryOwner` is deliberately idempotent (non-strict): re-adding an existing owner is a silent no-op (no event, no revert), and leaves the intended state. `removeRecoveryOwner` is STRICT since 2026-08-25: removing an address that is not on the allowlist reverts `RecoveryOwners_Unknown`. Rationale: a quorum culling a compromised backup with a mistyped address previously got a successful Safe transaction, an `ExecutionSuccess` and no `RecoveryOwnerRemoved` event, while the compromised backup stayed `swapOwner`-eligible during recovery. The cost is deliberate loss of removal idempotence: a MultiSend cleanup containing one already-absent address reverts atomically and rolls back every later genuine removal, so the operator MUST refresh the allowlist before signing a batched cull. Pinned by `test/poc/VerifierAndGriefing.t.sol::test_regression_removeRecoveryOwnerRevertsOnAnUnknownAddress` and `::test_limitation_strictRecoveryOwnerRemovalRollsBackStaleCleanupBatch`. The strict variants (`RecoveryOwners_AlreadyRegistered` on duplicates) apply only inside `initialize`, where a duplicated initial list indicates an operator error worth failing loudly.
 
@@ -425,8 +438,6 @@ function isLockdownSigner(address safe, bytes calldata signer)
     external view returns (bool);
 function getLockdownSigners(address safe)
     external view returns (bytes[] memory signers);
-function testSigner(bytes calldata signer, bytes32 hash, bytes calldata signature)
-    external view returns (bool ok);
 function isSignerBurntPermanently(address safe, bytes calldata signer)
     external view returns (bool);
 function getState(address safe)
@@ -441,13 +452,20 @@ function getConfigSnapshot(address safe) external view returns (
 function isRecoveryOwner(address safe, address owner) external view returns (bool);
 function getRecoveryOwners(address safe) external view returns (address[] memory owners);
 function lastReasonHash(address safe) external view returns (bytes32);
+function hashLockdownTrigger(address safe, bytes calldata signer, bytes32 reasonHash)
+    external view returns (bytes32);
+function isErc1271Allowed(address safe) external view returns (bool);   // H.27
 ```
+
+`hashLockdownTrigger(safe, signer, reasonHash)` returns the full EIP-712 digest `triggerLockdown` verifies for that tuple (§5.2). Both go through the same internal `_hashLockdownTrigger`, so signing tools and the off-chain drill can take the digest from the singleton instead of re-implementing the encoding (H.29). It takes no signature and verifies nothing, so calling it over an RPC exposes no trigger credential: it is not a drill view in the H.17 / H.25 sense.
+
+`isErc1271Allowed(safe)` reports the H.27 opt-in (default `false`, also for an uninitialised Safe). It is deliberately NOT part of `getConfigSnapshot`, whose 5-field tuple is decoded by `scripts/preflight-install-v1.sh`, `scripts/verify-install-v1.sh`, `deploy/lockdown-lifecycle.html`, the browser tests and the Echidna harness; consumers read it with its own call.
 
 `getLockdownSigners(safe)` returns the full set of registered identity bytes (enumeration via `EnumerableSet.BytesSet`). It replaces the old id-indexed reverse-map readers: incident tooling reads the active set directly, and `LockdownSignerAdded` / `LockdownSignerRemoved` carry the raw `signer` bytes, so indexers need no on-chain reverse map. `isLockdownSigner(safe, signer)` reports set membership for one identity.
 
-`testSigner(signer, hash, signature)` (H.17 view) runs the same `SignatureChecker.isValidSignatureNow` dispatch the trigger path uses, WITHOUT requiring registration and WITHOUT mutating state. It lets an operator dry-run a panic identity (e.g. confirm a freshly provisioned passkey or HSM key signs correctly) before registering it.
+**No on-chain drill view.** V1 previously exposed `testSigner(signer, hash, signature)` (H.17), a view running the trigger's `SignatureChecker` dispatch without burning. It was removed: a trigger signature is a bearer credential (anyone holding it can call `triggerLockdown`, and `reasonHash` is caller-chosen, so even a "drill" signature is usable), and a public view invites operators to send exactly that signature to an RPC endpoint where it can be logged or intercepted. Drills are performed OFF-CHAIN instead: `script/DrillSigner.s.sol` reads the exact trigger digest from `hashLockdownTrigger` and runs the same `SignatureChecker.isValidSignatureNow` call in a local EVM against a fork (`forge script script/DrillSigner.s.sol --fork-url "$RPC"`; only public state is fetched, the signature never leaves the machine, nothing is broadcast), and the lifecycle UI verifies ECDSA and WebAuthn signatures locally in the browser. A drill signature nevertheless remains a live trigger until its identity is burnt or removed (§H.25): operators keep it local, discard it, and rotate the identity if it may have leaked.
 
-**`testSigner` is the ONLY observable that distinguishes an armed Safe from an inert one, and the drill is therefore runbook-mandatory rather than optional (pre-tag review, 2026-08-25).** Registration accepts strictly more than verification requires: `_validateSigner` demands verifier code only for identities longer than 20 bytes, never asks a verifier whether a key SHAPE is usable, and re-checks nothing after registration. A Safe can therefore be fully green on every cheap observable - three slots wired, config initialised, `getState` Normal, `getLockdownSignerCount > 0`, preflight passing - and have NO working trigger. Proven cases, each in `test/poc/ArmedButInert.t.sol`: a 20-byte identity holding non-ERC-1271 code; a codeless 20-byte identity; a key length the verifier rejects; a verifier that lost its code after registration; and an EOA delegated under EIP-7702 (§14.1). `test_limitation_fullyGreenSafeCanHaveNoWorkingTrigger` is the composite. In every one of them `testSigner` returns `false` before the incident, and nothing else does. The drill MUST use the exact EIP-712 trigger digest for that `(safe, reasonHash)`, not an arbitrary hash, or it proves nothing. Caveat unchanged: it is UNSAFE for password / commit-reveal verifiers, where the preimage would leak over RPC - drill those with throwaway material only.
+**The off-chain drill is the ONLY check that distinguishes an armed Safe from an inert one, and it is therefore runbook-mandatory rather than optional (pre-tag review, 2026-08-25).** Registration accepts strictly more than verification requires: `_validateSigner` demands verifier code only for identities longer than 20 bytes, never asks a verifier whether a key SHAPE is usable, and re-checks nothing after registration. A Safe can therefore be fully green on every cheap observable - three slots wired, config initialised, `getState` Normal, `getLockdownSignerCount > 0`, preflight passing - and have NO working trigger. Proven cases, each in `test/poc/ArmedButInert.t.sol`: a 20-byte identity holding non-ERC-1271 code; a codeless 20-byte identity; a key length the verifier rejects; a verifier that lost its code after registration; and an EOA delegated under EIP-7702 (§14.1). `test_limitation_fullyGreenSafeCanHaveNoWorkingTrigger` is the composite. In every one of them the drill (`DrillSigner.isValid`) returns `false` before the incident, and nothing else does. The drill MUST use the exact EIP-712 trigger digest for that `(safe, signer, reasonHash)` (`hashLockdownTrigger`), not an arbitrary hash, or it proves nothing. It reads forked state at drill time, so it cannot see later changes (e.g. an EOA identity delegated under EIP-7702 after the drill). For password / commit-reveal verifiers, check `keccak256(password) == commitment` offline; never send the cleartext anywhere before the real trigger.
 
 `isSignerBurntPermanently(safe, signer)` (V1, INV-SIGN-7) reports whether the identity has ever been removed, rotated-away, or `triggerLockdown`-burnt on this Safe. It lets the post-resume runbook (§8.3) pre-check whether a planned `addLockdownSigner` would revert `LockdownSigners_BurntPermanently` and rotate to a fresh identity instead.
 
@@ -460,6 +478,8 @@ All helpers are read-only; none mutates state.
 ### 7.1 Uninitialised Safe (fail-open pass-through)
 
 If `_configs[msg.sender].lockdownDuration == 0`, all hooks return immediately without reverting. Rationale: anti-brick on install-order mistakes. An uninit Safe cannot be triggered into lockdown (`triggerLockdown` is `onlyInitialized` (PR #59), so it still reverts `InvalidState` on an uninitialised Safe), so the pass-through cannot suppress a real lockdown.
+
+Exception, the module path: before initialize it is not a pure pass-through. It still denies singleton calls (`ModuleCallToSingletonDenied`, H.12) and the guard-disable self-calls (`ModuleSafeSelfCallDenied`, H.20), at every MultiSend depth. Every other module call passes, owner topology included (H.28): the pre-init window is fail-open by design and is closed operationally by the atomic install, not by extra module-path rules.
 
 ### 7.2 Normal mode (`cfg.lockdownUntil == 0`)
 
@@ -488,7 +508,17 @@ check and the MultiSend walk. At each level it enforces:
 - The `safeTxHash` THAT GETS SCHEDULED already binds every refund field via `Safe.getTransactionHash(...)`. A coerced quorum that schedules a draining tx with `gasToken == attackerToken, refundReceiver == attacker` cannot then execute a clean version; the hash would not match.
 - The protection is the off-chain operator review of the scheduled safeTxHash: it represents the EXACT params that will execute. Refund fields are part of that hash.
 
-**Operator obligation** (post-resume runbook §8.3 calls this out as a hard obligation, not soft): when the quorum reviews any `TransactionScheduled(safe, safeTxHash, executableAt)` event, the off-chain signer review tooling MUST resolve the hash to the underlying tx params and surface the refund fields. The off-chain review pipeline is what catches `gasToken != 0` / `refundReceiver != 0` configurations; the on-chain guard cannot judge intent. Same obligation Safe v1.5.0 operators carry independently for any non-trivial tx.
+**Operator obligation** (post-resume runbook §8.3 calls this out as a hard obligation, not soft): when the quorum reviews any `TransactionScheduled(safe, safeTxHash, executableAt)` event, the off-chain signer review tooling MUST resolve the hash to the underlying tx params and surface the refund fields. The off-chain review pipeline is what catches dangerous refund configurations; the on-chain guard cannot judge intent. Same obligation Safe v1.5.0 operators carry independently for any non-trivial tx.
+
+**Correction (2026-08-28 refund-window campaign): the review criterion is NOT "flag `gasToken != 0` / `refundReceiver != 0`".** That earlier wording was inverted for the most dangerous case and would have cleared exactly the transaction carrying an unbound callback. Three facts, each executed in `test/poc/RefundPostHookReentrancy.t.sol`:
+
+- Safe v1.5.0 pays the refund BETWEEN the executed call and the guard's `checkAfterExecution`, on a guard cached before execution (`Safe.sol:149`, `:197`, `:204`). The refund receiver gets control while the post-hook has not yet run, so the outer ticket is still live at that moment.
+- The native refund is `receiver.call{value: payment}("")`, an unrestricted call forwarding essentially all remaining gas. It is NOT the 2300-gas `send` of Safe 1.3.0 on which 0x's `SafeGuard` rests its claim that native sponsorship is safe; Bailsec's June 2026 upgrade audit of that contract rated the same window Medium and warned the premise must be revisited for Safe v1.5.0. The premise does not hold for us.
+- **`refundReceiver == address(0)` does not mean "no receiver". It means `tx.origin`.** Code there, by EIP-7702 delegation or simply a contract submitter, receives control although the signed hash commits only to `address(0)`. This is the AR-18 shape applied to a different field: the hash is not a description of what will run.
+
+The corrected obligation: whenever `gasPrice != 0`, the reviewer MUST treat the transaction as carrying a third-party callback, resolve `gasToken` and `refundReceiver` to code, and treat `refundReceiver == address(0)` as the HIGHEST-attention case rather than the safest, because the executing code is then not determined at signing time. A failed inner call does not close the window either: with `safeTxGas != 0` Safe still pays the refund and still calls the post-hook with `success == false`, so the callback runs and the scheduled ticket is deliberately preserved (INV-TIME-4). See AR-24 and AR-25.
+
+No on-chain restriction was added. The campaign's dominance control shows an owner-approved, scheduled `MultiSendCallOnly` bundle with every refund field zero reaches the same end state, so the window changes atomicity and observability rather than authority.
 
 Recovery's all-zero gate is justified because recovery actions are a narrow whitelist of pre-defined operations (swapOwner, removeSigner, disableModule, nonce burn) that NEVER legitimately need refund fields. The Normal-mode path has no such whitelist - any user tx is allowed - so a blanket refund-field rejection would break legitimate use.
 
@@ -534,7 +564,7 @@ The recovery whitelist (`_isRecoveryCall`):
 - Or `to == address(this)` (the singleton) and `data` is:
   - `removeLockdownSigner(bytes signer)` (selector + arbitrary ABI tail; the function itself re-validates contents).
 
-`addLockdownSigner`, `rotateLockdownSigner`, `setLockdownDuration`, `setResumeDelay`, `addRecoveryOwner`, `removeRecoveryOwner` remain unreachable during Recovering: the quorum waits for Normal state for anything that creates new authorisation surface.
+`addLockdownSigner`, `rotateLockdownSigner`, `setLockdownDuration`, `setResumeDelay`, `setErc1271Allowed`, `addRecoveryOwner`, `removeRecoveryOwner` remain unreachable during Recovering: the quorum waits for Normal state for anything that creates new authorisation surface.
 
 Rationale: V1 allows `removeLockdownSigner` during Recovering to mitigate the **relock race**. With a strict whitelist that allowed no signer removal, a compromised signer surviving in storage could relock the Safe in the very first block after the auto-resume, before the quorum could remove it. Recovering-time removal cleans up surviving compromised signers atomically inside the recovery window (still gated by owner-path `execTransaction`, so any signer removal requires full Safe quorum). A verifier-class bulk kill-switch is intentionally not present; the Safe can batch multiple per-identity removals via MultiSend. `disableModule` is on the whitelist for the same "regain control / shut a bypass path during recovery" reason and is value-less; the compromised-module threat itself is out of scope (a module is never acquired by accident, and a detected rogue module is disabled directly in Normal without any lockdown).
 
@@ -550,10 +580,10 @@ not a bypass.
 - Pre-init (H.12) the hook rejects any call targeting the singleton itself (`to == address(this)`) with `ModuleCallToSingletonDenied`; during Normal mode the same denial is enforced inside `_checkCall` (see the next bullet), so a module can never reach the singleton in any state that a call could otherwise pass through.
 - During Normal mode (and Uninitialised), the module path is routed through the shared `_checkCall` helper with `allowAdminCalls = false` (the owner path passes `true`; the flag threads through every recursion level). Consequences (normative):
   - a module `CALL` to a non-singleton target is allowed; a `CALL` whose `to` is the singleton reverts `ModuleCallToSingletonDenied`;
-  - on EVERY path (owner and module), a `CALL` whose `to` is the singleton and whose selector is one of the four guard hooks (`checkTransaction` / `checkAfterExecution` / `checkModuleTransaction` / `checkAfterModuleExecution`) reverts `GuardHookSelfCallDenied` (H.20): the hooks are internal machinery the Safe invokes around execution and must never be reachable as a user-tx `to`. Otherwise a pre-scheduled owner-path call to `checkAfterModuleExecution(0, false)` could clear the module reentrancy in-flight slot mid-flight and replay a scheduled module ticket (breaks INV-TIME-11);
+  - on EVERY path (owner and module), a `CALL` whose `to` is the singleton and whose selector is one of the four guard hooks (`checkTransaction` / `checkAfterExecution` / `checkModuleTransaction` / `checkAfterModuleExecution`) reverts `GuardHookSelfCallDenied` (H.20): the hooks are internal machinery the Safe invokes around execution and must never be reachable as a user-tx `to`. Otherwise a pre-scheduled owner-path call to `checkAfterModuleExecution(hash, false)` would (re-)create an immediately executable module ticket for an arbitrary module tx while the timelock is active, bypassing the timelock (breaks INV-TIME-4 / INV-TIME-10);
   - a module `DelegateCall` is allowed ONLY to canonical `MultiSendCallOnly` and is parsed recursively exactly like the owner path; any other `DelegateCall` reverts `DelegateCallDenied`, and a non-CALL/non-DelegateCall op reverts `InvalidOperation`;
   - because `allowAdminCalls = false` propagates into every recursion level, any inner call targeting the singleton inside a module MultiSend batch also reverts `ModuleCallToSingletonDenied` - there is no depth at which a module can administer the Lockdown singleton;
-  - a `to == safe` self-call carrying a guard-DISABLE selector - `setGuard(address)` / `setModuleGuard(address)` / `setFallbackHandler(address)` - reverts `ModuleSafeSelfCallDenied` on the module path (H.20). These three are the ONLY Safe self-calls the module path is denied, and they are exactly the ones that could remove the lockdown protection itself: dropping the transaction/module guard, or swapping the fallback handler for a non-freezing ERC-1271 shim. Every OTHER Safe self-call stays ALLOWED on the module path - owner topology (`addOwnerWithThreshold` / `swapOwner` / `changeThreshold`), module management (`enableModule` / `disableModule`), arbitrary module calls. This is a DELIBERATE threat-model decision: in Safe's security model a coerced module in Normal mode already has arbitrary execution power, and as long as it cannot DISABLE the guard, a future lockdown still freezes everything, so the guarantee holds. Constraining that residual module power further is a conscious non-goal - over-constraining the module path would block legitimate module use-cases for no real security gain;
+  - a `to == safe` self-call carrying a guard-DISABLE selector - `setGuard(address)` / `setModuleGuard(address)` / `setFallbackHandler(address)` - reverts `ModuleSafeSelfCallDenied` on the module path (H.20). These three are the ONLY Safe self-calls the module path is denied, and they are exactly the ones that could remove the lockdown protection itself: dropping the transaction/module guard, or swapping the fallback handler for a non-freezing ERC-1271 shim. In every state where the module path runs (Uninitialised and Normal), every OTHER Safe self-call stays ALLOWED on the module path - owner topology (`addOwnerWithThreshold` / `swapOwner` / `removeOwner` / `changeThreshold`), module management (`enableModule` / `disableModule`), arbitrary module calls. This denial is a DIRECT-CALL guarantee, not an authority guarantee (H.28): a module that adds an owner it controls can then use that owner's owner-path powers, including `setGuard(0)` and singleton administration, subject only to the owner-path timelock when `timelockDelay > 0`; before initialize, that owner can also `initialize` the Safe through the fail-open owner path. Owner topology is NOT denied on the module path: legitimate modules rotate owners (social recovery, signer-gate, inheritance modules), and the guard deliberately adds no edge-case logic beyond the singleton and guard-disable denials;
   - `setFallbackHandler` on the OWNER path must still bind a singleton-bound `LockdownFallbackHandler`, else `InvalidFallbackHandler`; on the module path it is denied outright (above). The untrusted module path can therefore never swap the ERC-1271 freeze, while the owner path keeps the flexible on-chain lockdown-awareness check plus off-chain codehash attestation (exact on-chain codehash pinning remains a rejected non-goal, see `V1_NON_GOALS.md`).
 - Rationale for the singleton denial: without it, an enabled module could execute `Safe.execTransactionFromModule(lockdown, 0, addLockdownSigner_data, CALL)` (or nest that CALL inside a MultiSend delegatecall) and the singleton would see `msg.sender == safe` and accept the admin write - bypassing the owner-path execTransaction (and therefore the Safe quorum threshold). The singleton must only be administered via owner-path execTransaction.
 - During LockedDown / Recovering, the hook reverts unconditionally (`LockedDown` or `RecoveryActive`). Modules are totally disabled until the recovery window elapses and the Safe auto-resumes to Normal. The module path is frozen during the incident because a module executes without signer consensus, so leaving it open would be an unfrozen drain path around the owner-path freeze - not because a compromised module is itself in the threat model (that case is out of scope; see §7.4).
@@ -629,6 +659,16 @@ worst-case freeze a single trigger costs (`lockdownDuration + resumeDelay`, in
 hours/days) so a transposed or over-sized value is caught before it bites
 during a real incident.
 
+It also FAILs (rather than WARNs) on a dormant install (`signersCount == 0`)
+unless `--allow-dormant` is passed for the intermediate check of a staged
+install (decision 7), and, given the JSON written by
+`preflight-install-v1.sh --snapshot-out`, FAILs if the Safe's owners, threshold
+or enabled modules differ from the pre-install snapshot (an install batch that
+also slips in `addOwnerWithThreshold` or `enableModule`). Without `--snapshot`
+it prints them and WARNs that they were not compared. The Safe masterCopy
+(proxy slot 0) `EXTCODEHASH` pin is fail-closed in both scripts, like the
+singleton, `MultiSendCallOnly` and fallback-handler pins.
+
 ### 8.3 Post-resume runbook
 
 Once the recovery window elapses and the Safe auto-resumes to Normal, the Safe quorum MUST immediately:
@@ -668,6 +708,7 @@ event SafeInitialised(
 
 event LockdownDurationChanged(address indexed safe, uint64 newDuration);
 event ResumeDelayChanged(address indexed safe, uint64 newDelay);
+event Erc1271AllowedChanged(address indexed safe, bool allowed);   // H.27
 event RecoveryOwnerAdded(address indexed safe, address indexed owner);
 event RecoveryOwnerRemoved(address indexed safe, address indexed owner);
 
@@ -733,11 +774,15 @@ error InvalidFallbackHandler();         // decodable handler whose LOCKDOWN() !=
                                         // revert earlier without this selector, §7.2)
 error ZeroAddress();                    // zero-address constructor / setter argument
 
+// LockdownFallbackHandler (isValidSignature, in this order)
+error SignaturesFrozenDuringLockdown(); // Safe is LockedDown or Recovering
+error Erc1271Disabled();                // Safe has not opted in (H.27, default)
+
 // Timelock errors are declared in the timelock sub-section: TimelockDisabled,
 // TimelockDelayTooLow, TimelockDelayTooHigh, TimelockExceedsLockdownDuration,
 // TicketAlreadyExists, TicketNotFound, TimelockNotElapsed, TicketExpired,
 // TicketNotExpired, NotTimelockBypasser, BypasserZeroAddress,
-// TimelockBypassRefundDenied, ReentrantModuleTimelockExecution.
+// TimelockBypassRefundDenied.
 ```
 
 ## 11. Invariants (auditor verification targets)
@@ -757,7 +802,7 @@ Proof technique: read every storage write, confirm the slot derivation includes 
 **INV-AUTH-1**: `triggerLockdown(safe, reasonHash, signer, sig)` reverts unless ALL of:
 - `_configs[safe].lockdownDuration > 0` AND `_configs[safe].lockdownUntil == 0` (enforced by `onlyNormal(safe)`; otherwise `InvalidState`)
 - `signer` is currently a member of `_configs[safe].signers` (otherwise `LockdownSigners_Unknown`, raised by the burn helper)
-- `SignatureChecker.isValidSignatureNow(signer, digest, sig)` returns true, where `digest = _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe, reasonHash)))`. For a `verifier || key` identity this is a STATICCALL to `verifier.verify(key, digest, sig)` that must return the ERC-7913 magic value `0x024ad318`; any other outcome (revert, short return, non-magic return) maps to `BadSignature()`. For a 20-byte identity it is ECDSA / ERC-1271.
+- `SignatureChecker.isValidSignatureNow(signer, digest, sig)` returns true, where `digest = _hashTypedDataV4(keccak256(abi.encode(LOCKDOWN_TYPEHASH, safe, keccak256(signer), reasonHash)))` (EIP-712 encodes the dynamic `bytes signer` field as its `keccak256`). For a `verifier || key` identity this is a STATICCALL to `verifier.verify(key, digest, sig)` that must return the ERC-7913 magic value `0x024ad318`; any other outcome (revert, short return, non-magic return) maps to `BadSignature()`. For a 20-byte identity it is ECDSA / ERC-1271.
 
 **INV-AUTH-2**: Hooks `checkTransaction` / `checkModuleTransaction` only mutate or read `_configs[msg.sender]`.
 
@@ -767,19 +812,19 @@ Proof technique: read every storage write, confirm the slot derivation includes 
 
 **INV-LIFE-1**: Auto-resume is purely time-based: `getState` reports `Normal` once `block.timestamp >= lockdownUntil + resumeDelay`, with no transition transaction or storage write. No call may clear an active incident. After the old window has elapsed, a successful Normal-state `setResumeDelay` clears `lockdownUntil` and `lockdownReasonHash` before writing the new delay; therefore a delay update can never resurrect the elapsed incident. Otherwise the raw fields remain until a subsequent `triggerLockdown` overwrites them. Consumers derive lifecycle state from `getState`, not from a raw `lockdownUntil != 0` predicate. Verified by `test_setResumeDelay_afterAutoResume_doesNotReopenRecovery` and `echidna_resumeDelayCannotReopenIncident`.
 
-**INV-LIFE-2**: `triggerLockdown(safe, ...)` is gated by `onlyInitialized` (PR #59): it succeeds in any initialised state (Normal, LockedDown, Recovering) and reverts `InvalidState` only when the Safe is uninitialised. A re-trigger while the Safe is still LockedDown/Recovering re-runs `_lock`, setting `lockdownUntil = block.timestamp + lockdownDuration`. Because `block.timestamp` only advances and `lockdownDuration` is immutable during an incident (INV-LIFE-3), a re-trigger can only push `lockdownUntil` **forward** - it never shortens an active lockdown, and from Recovering it re-locks the Safe back into LockedDown. Once the recovery window has elapsed the Safe has already auto-resumed to `Normal` (no separate Resumable state), so a later trigger simply starts a fresh lockdown. Every trigger still burns one single-use signer (INV-SIGN-7), so the number of re-triggers is bounded by the count of registered signers, and no new signer can be added during an incident (INV-LIFE-3).
+**INV-LIFE-2**: `triggerLockdown(safe, ...)` is gated by `onlyInitialized` (PR #59): it succeeds in any initialised state (Normal, LockedDown, Recovering) and reverts `InvalidState` only when the Safe is uninitialised. A re-trigger while the Safe is still LockedDown/Recovering re-runs `_lock`, setting `lockdownUntil = max(block.timestamp, lockdownUntil) + lockdownDuration`. While LockedDown the new window stacks on the current one (it adds a full `lockdownDuration` to the existing `lockdownUntil` rather than restarting from `now`), so N triggers in the same block freeze for `N × lockdownDuration`. From Recovering or Normal, `lockdownUntil <= now`, so the window starts from `now`. Because `lockdownDuration` is non-zero and immutable during an incident (INV-LIFE-3), a re-trigger can only push `lockdownUntil` **forward** - it never shortens an active lockdown, and from Recovering it re-locks the Safe back into LockedDown. Once the recovery window has elapsed the Safe has already auto-resumed to `Normal` (no separate Resumable state), so a later trigger simply starts a fresh lockdown. Every trigger still burns one single-use signer (INV-SIGN-7), so the number of re-triggers is bounded by the count of registered signers, and no new signer can be added during an incident (INV-LIFE-3).
 
 **INV-LIFE-3**: `lockdownDuration[safe]`, `resumeDelay[safe]`, `recoveryOwnerAllowlist[safe][_]`, **signer additions and rotations** cannot change while the Safe is in LockedDown or Recovering. Signer **removal** (`removeLockdownSigner`) is the explicit exception: forbidden during LockedDown, allowed during Recovering (and Normal) via `onlyNotLockedDown` (§7.4 rationale).
 
 **INV-LIFE-4**: During Recovering, the only owner-path calls accepted by the hook are: `removeLockdownSigner(signer)` to `address(this)`, plus the documented Safe self-calls (nonce burn; allowlisted exact-length `swapOwner` to a non-owner recovery owner; exact-length `disableModule`).
 
-**INV-LIFE-5**: The module-path hook rejects any call targeting `address(this)` (the singleton) in every state, with error `ModuleCallToSingletonDenied`. The singleton may only be administered via owner-path execTransaction.
+**INV-LIFE-5**: The module-path hook rejects any call targeting `address(this)` (the singleton) in every state, at every MultiSend depth, with error `ModuleCallToSingletonDenied`. The singleton may only be administered via owner-path execTransaction. This is a direct-call property, not an authority property: a module that first makes itself (or an address it controls) an owner reaches the singleton through that owner (H.28). It is the accepted residual of §14 in both states where the module path runs: in Normal the owner timelock applies when `timelockDelay > 0`; pre-init the owner path is fail-open, so the canonical atomic install (no Uninitialised window) is required (H.28).
 
 **INV-LIFE-6**: Every admin setter is state-gated and reverts `InvalidState` when the Safe is not in the required state (e.g. `onlyNormal` setters reject an uninitialised or incident Safe). Only `initialize` (gated by `onlyUninitialised`) can write the `lockdownDuration > 0` lifecycle sentinel.
 
 ### 11.4 Signer single-use
 
-**INV-SIGN-1**: `triggerLockdown(safe, _, signer, _)` verifies through `testSigner` before mutating signer state. On successful verification it removes `signer` from `_configs[safe].signers` and marks it permanently burnt via the shared remove helper before the lockdown state mutation. A failed verification therefore performs no burn, and any later revert rolls the removal back; the burn persists only on success. No other code path removes a signer except `removeLockdownSigner` and `rotateLockdownSigner` (both Safe-gated).
+**INV-SIGN-1**: `triggerLockdown(safe, _, signer, _)` verifies the signature (inline `SignatureChecker.isValidSignatureNow`) before mutating signer state. On successful verification it removes `signer` from `_configs[safe].signers` and marks it permanently burnt via the shared remove helper before the lockdown state mutation. A failed verification therefore performs no burn, and any later revert rolls the removal back; the burn persists only on success. No other code path removes a signer except `removeLockdownSigner` and `rotateLockdownSigner` (both Safe-gated).
 
 **INV-SIGN-2**: The active signer count is `signers[safe].length()` (an `EnumerableSet.BytesSet`); there is no separately-stored counter that could desync from the set.
 
@@ -870,7 +915,7 @@ The V1 review must spend disproportionate time on:
 
 3. **Single-use burn correctness (INV-SIGN-1)**. Confirm a successful trigger removes the identity from `signers` (so subsequent membership checks return false) and marks it in `signerBurntPermanently` (so re-registration reverts `LockdownSigners_BurntPermanently`). Confirm the removal is rolled back on a `BadSignature` revert.
 
-4. **EIP-712 typehash and domain separator**. Confirm the typehash string is `Lockdown(address safe,bytes32 reasonHash)` and matches the function semantics. Confirm OZ EIP712 domain handling binds chain id and verifying contract correctly. Confirm replay safety across re-registrations comes from single-use burn + the permanent burnt-identity register (not from a counter in the message).
+4. **EIP-712 typehash and domain separator**. Confirm the typehash string is `Lockdown(address safe,bytes signer,bytes32 reasonHash)`, that `signer` is encoded as `keccak256(signer)` per EIP-712, and that it matches the function semantics (the digest binds the submitted identity). Confirm OZ EIP712 domain handling binds chain id and verifying contract correctly. Confirm replay safety across re-registrations comes from single-use burn + the permanent burnt-identity register (not from a counter in the message).
 
 5. **Signer identity enforcement (INV-VER-1, INV-VER-2)**. Confirm `triggerLockdown` authorises only an exact registered identity and that per-identity removal fully and permanently neutralises it.
 
@@ -883,12 +928,16 @@ The V1 review must spend disproportionate time on:
 ## 14. Out of scope / accepted risks
 
 - Direct owner `approveHash(bytes32)` calls outside `execTransaction`. Safe v1.5.0 limitation; watchers handle this off-chain.
-- **ERC-1271 authorisations are deferred, not invalidated.** The `LockdownFallbackHandler` makes `isValidSignature` revert throughout LockedDown and Recovering, but a signature produced before OR during the incident validates again at auto-resume if the signing owner remains in the current owner set. Recovery must replace a compromised owner to kill its outstanding signatures; auto-resume without that swap restores them. Token approvals / Permit2 allowances remain directly spendable by the approved spender without touching the Safe's execution paths. Operator obligation: complete owner recovery and minimise standing approvals and open orders. Pinned by `test/poc/Erc1271IncidentSignature.t.sol`; see the handler header and AUDIT_BRIEF accepted-risk register #15.
+- **ERC-1271 is an operator choice; allowing it re-opens NM-1060 6.1 by choice (H.27).** ERC-1271 is disabled by default (`erc1271Allowed == false`). A Safe that calls `setErc1271Allowed(true)` exposes an `execTransaction`-free signing surface: an off-chain signature (permit, EIP-3009, Permit2, CoW, Seaport, ...) is settled by a third party with no guard hook, hence with no timelock reaction window even when `timelockDelay > 0`. Allowing ERC-1271 with `timelockDelay > 0` is therefore an operator-accepted residual of NM-1060 6.1, not a defect. The choice itself is owner-path, `onlyNormal` and timelocked, so a coerced quorum cannot flip it instantly on a timelocked Safe. Pinned by `test/poc/Erc1271OptIn.t.sol`; AUDIT_BRIEF AR-15.
+- **For an opted-in Safe, ERC-1271 authorisations are deferred, not invalidated.** The `LockdownFallbackHandler` makes `isValidSignature` revert throughout LockedDown and Recovering whatever the flag, but a signature produced before OR during the incident validates again at auto-resume if the signing owner remains in the current owner set and the flag is still set (an incident does not clear it). Recovery must replace a compromised owner to kill its outstanding signatures; auto-resume without that swap restores them. Token approvals / Permit2 allowances remain directly spendable by the approved spender without touching the Safe's execution paths. Operator obligation: complete owner recovery, minimise standing approvals and open orders, and consider `setErc1271Allowed(false)` after an incident. Pinned by `test/poc/Erc1271IncidentSignature.t.sol`; see the handler header and AUDIT_BRIEF accepted-risk register #15.
+- **A Lockdown-protected Safe must not be a 20-byte lockdown signer of another Safe, nor of itself (NM-1060 6.3, Low, no fix; strengthened from "not the sole identity").** Since H.27 such a signer Safe must first opt in to ERC-1271 (otherwise the drill already fails in Normal). Even opted in, such an identity can pass the exact off-chain drill (`script/DrillSigner.s.sol`) while both Safes are Normal, then become unusable during a correlated incident because the signer Safe's own `LockdownFallbackHandler` rejects every ERC-1271 check in LockedDown and Recovering. This is intended behavior for the signer Safe but a liveness failure for the target. An attacker who holds one of the signer Safe's own panic identities can freeze it and thereby disarm every trigger that depends on it, exactly when it is needed. Quorum signers and lockdown signers face opposite expectations: owners optimise for security and deliberation, lockdown signers for independence and reactivity, so a Safe (multi-party, slow, possibly frozen) is a very bad lockdown signer in general. Operator obligation: use independent 20-byte EOAs or separately approved shipped verifier identities in another failure domain. Pinned by `test/daybreak/supported_liveness/SupportedLiveness.t.sol` and tracked as AR-22.
+- **Lockdown enforcement is entry-time within an EVM transaction.** Safe calls the pre-hook before executing the target. If the approved call tree itself invokes `triggerLockdown`, later instructions in that same atomic transaction can still execute even though `getState` now reports LockedDown; no unrelated transaction can interleave after the pre-hook. This creates no additional attacker authority because the exact owner/module call was already authorized and would produce the same effect if it omitted the nested trigger. A post-hook state revert is rejected because it would atomically roll back the lockdown too. Pinned by the parser/executor and stateful-hook tests under `test/daybreak/` and tracked as AR-23.
 - 1-of-N griefing lockdown: any single registered signer can trigger. Accepted by design (panic primitive). Recovery rotates the bad signer.
 - **Post-resume zero-signer window**: between the auto-resume to Normal and the next `addLockdownSigner(...)`, the Safe has fewer registered signers (often zero) if the incident burnt them. During this window, no lockdown can fire. Mitigation: register multiple signers up-front, or re-register as the first tx once the recovery window has elapsed. Runbook critical.
 - **Operational cost of single-use signers**: burn-on-success applies uniformly to every successful `triggerLockdown(...)`, including ECDSA and WebAuthn paths. Any real trigger - real incident, drill, false positive, or accidental click - consumes one signer entry. Re-arming is a Normal-mode quorum transaction (`addLockdownSigner` per identity, or `rotateLockdownSigner` to swap material in place); it cannot be done during Recovering and is not on the recovery whitelist. Operators must size `MAX_LOCKDOWN_SIGNERS`-bounded entries against their expected false-positive / drill rate and budget the quorum cost of re-registration. The contract makes no distinction between identity types here: a passkey entry burns the same way a one-shot password entry does.
 - **Permanent administrative burn and identity poisoning**: `removeLockdownSigner` and the remove half of `rotateLockdownSigner` burn the exact identity forever for that Safe. A coerced quorum can therefore pre-burn enumerable future identities. V1 keeps this uniform rule because `PasswordVerifier` ignores the digest and depends on permanent burn for replay defence; a registration epoch would also add an RPC state dependency to emergency signing. The recovery path is fresh ERC-7913 key material. An epoch remains a V1.2 candidate.
 - **Post-initialization installation drift**: Solidity does not continuously re-check the Safe's transaction-guard, module-guard and fallback-handler slots. Partial uninstall/reinstall can leave an execution surface uncovered while singleton views still report `LockedDown`. This is detected and repaired privately by the operator UI/monitoring before an incident. `triggerLockdown` deliberately blocks every path it still can and neither fails on incomplete installation nor emits an incident-time warning that would disclose a possible route to the coercer.
+- **Module-to-owner escalation in Normal (H.28, AR-29, NM-1060 6.2)**: an enabled module may call the Safe's owner-topology functions in Normal (legitimate recovery, signer-gate and inheritance modules need them), so a malicious module can add an owner it controls with threshold 1 and then act on the owner path: remove the guard, or administer the singleton. With `timelockDelay > 0` the module call itself needs a quorum-scheduled module ticket, and the new owner's owner-path transaction needs a fresh full delay (`scheduleTransaction` checks signatures against the current owners), so the escalation is visible for one whole delay. With `timelockDelay == 0` (including base `Lockdown` without the timelock) it completes in two transactions with no reaction window. Accepted: an enabled module is quorum-authorised trust. Operator obligations: enable only audited modules, prefer `timelockDelay > 0` when any owner-rotating module is enabled, and alert off-chain on `AddedOwner` / `RemovedOwner` / `ChangedThreshold` emitted inside module transactions (`ExecutionFromModuleSuccess`). Before initialize the same escalation also reaches `initialize` through the fail-open owner path; it is closed operationally: install atomically (`setGuard`, `setModuleGuard`, `setFallbackHandler`, `initialize` in one MultiSend), and never leave a Safe Uninitialised with a module enabled.
 - Verifier malicious-by-design or buggy, and registered by the Safe quorum. Two failure modes:
   - **Always-true verifier**: gives anyone lockdown authority for any signer registered under it. Mitigation is operational: register only audited immutable verifier runtimes and treat each signer tuple as explicit authority.
   - **Always-false / selectively-broken verifier**: every legitimate `triggerLockdown` reverts `BadSignature`, so the signer cannot be burnt. The Safe is griefed until the quorum removes the affected signer entries. The contract enforces nothing about verifier correctness; the operator's runbook must include off-chain verifier drills and codehash pinning before registration.
@@ -898,7 +947,7 @@ The V1 review must spend disproportionate time on:
     Mitigation is operator policy, runbook-mandatory: the supported product domain is limited to the immutable, closed-world verifier runtimes shipped and codehash-pinned by this repository (self-contained: the `verify()` path makes no external calls and reads no mutable state). Third-party, upgradeable or external-state-dependent verifiers may be quorum-authorised by the generic contract, but receive no product behavioural guarantee. The native 20-byte ECDSA / ERC-1271 path is not unconditionally closed-world either: OZ `SignatureChecker` branches on `signer.code.length`, so an EIP-7702 authorisation silently moves a registered EOA identity to the ERC-1271 branch. A registered panic EOA MUST NOT be delegated. Any OOG, revert or invalid result condemns the entire identity; remove/rotate it and do not reuse that verifier.
 - WebAuthn verifier is supplied as a verifier contract; production use still depends on audited immutable runtime codehash pinning.
 - Privacy: a one-line `eth_getLogs` over the singleton enumerates every protected Safe. Accepted in exchange for singleton UX.
-- No `cancelLockdown`. A single false-positive trigger costs `lockdownDuration + resumeDelay`; since PR #59 (`triggerLockdown` is `onlyInitialized`) remaining signers can re-trigger to extend/re-lock, so the worst case is bounded by `≤ (remaining signers) × lockdownDuration + resumeDelay` (INV-LIFE-2). No owner override.
+- No `cancelLockdown`. A single false-positive trigger costs `lockdownDuration + resumeDelay`; since PR #59 (`triggerLockdown` is `onlyInitialized`) remaining signers can re-trigger to extend/re-lock, so the worst case is `k × (lockdownDuration + resumeDelay) − (k − 1)` seconds for `k` remaining signers, reached by re-triggering at the last second of each Recovering (INV-LIFE-2, H.24; ≈ 1,184 days at the caps). No owner override.
 - Hardware-wallet display quality remains operationally critical: `triggerLockdown` has 4 calldata params, including two dynamic `bytes` fields (`signer`, `signature`). The EIP-712 message itself has two fields (`safe`, `reasonHash`). Off-chain UX must clear-sign each field; see `docs/V1_HARDWARE_WALLET_UX.md` and `docs/clear-signing/`.
 
 ### 14.1 Deployment-trust threats (multichain same-address)
@@ -1068,10 +1117,12 @@ modules so the operator vets them first.
   intentionally outside the V1 audit target: minority timelock cancel,
   liveness/deadman recovery, irreversible config freeze, an on-chain
   non-bypassable admin floor, and a richer on-chain timelock queue.
+- **Per-Safe ERC-1271 message registry (V1.1, follows H.27)**. V1 makes ERC-1271 all-or-nothing per Safe (disabled by default, opt-in via `setErc1271Allowed`). V1.1 candidate for timelocked Safes that need specific off-chain signatures: a singleton-side registry where the Safe approves a specific message hash with an expiry through a scheduled owner tx (so it gets the timelock reaction window), plus a per-Safe epoch the quorum can bump to invalidate all outstanding approvals at once; the handler would accept only registry entries at the current epoch and before expiry. Not implemented.
 - **WebAuthn verifier (canonical)**. Use OpenZeppelin's `P256` library when stable. Allows phone Passkeys as lockdown signers.
 - **Threshold verifier**. M-of-N over an internal mini-quorum (BLS aggregated signature, or N independent ECDSA signatures). Allows "any 2 of 3 family members" to trigger lockdown.
 - **Recovery quorum**. Alternative to recovery owner allowlist: M-of-N attestation that owner rotation is legitimate.
 - **EIP-7913 chain-id edge cases**. OZ EIP712 handles chain-id changes by recomputing the domain separator. Chain forks during a lockdown remain outside the operational threat model for non-hash-bound verifiers such as passwords.
+- **Unanimous-signature timelock bypass instead of the HSM bypasser (V1.2 product question, not a V1 decision)**. 0x's `SafeGuard` lets any transaction carrying `ownerCount` signatures skip the timelock, via a `try/catch` on `checkNSignatures`. Adopting it as a REPLACEMENT for `timelockBypassers` would delete accepted risk 8 outright: no standing address with full owner-path bypass authority, and no T-BYPASS-8 forced burn of panic identities by a compromised HSM. The cost is liveness under our own threat model, where unanimity is exactly what a Safe with a lost key cannot produce and where the bypass exists for emergencies, plus an incompatible break for existing installations. Kept as an operator product decision, deliberately NOT a Solidity candidate: adopting it as an ADDITION rather than a replacement would merely add a third bypass lane.
 
 ## 16. Vendor strategy
 
@@ -1134,10 +1185,10 @@ The pre-hardening V1 recovery whitelist allowed no singleton self-call that coul
 
 Decision: extend the recovery whitelist to also accept `Lockdown.removeLockdownSigner.selector` when `to == address(this)`. The function itself is updated to allow execution during Recovering (but not during LockedDown - owner-path execution is blocked entirely in that state). The quorum can now identify and cull compromised signers during the recovery window, before resume re-opens the trigger path. `add` and `rotate` remain Normal-only because their pre-signed forms would be the wrench-attack vector this design exists to neutralise.
 
-**PR #59 update - `triggerLockdown` relaxed to `onlyInitialized`.** `triggerLockdown` is no longer `onlyNormal`; it succeeds in any initialised state (Normal, LockedDown, Recovering). Intended benefit: an operator can EXTEND an active incident on demand - a second panic signal re-locks/extends rather than being forced to pre-commit a long `lockdownDuration`. The canonical flow (runbook §8) is to re-trigger *before* the current window expires: `_lock` sets `lockdownUntil = now + lockdownDuration > now`, so the Safe stays LockedDown continuously and never enters Recovering. Re-triggering *during* Recovering is the safety net for a missed window: it re-locks back into LockedDown. Once the recovery window has fully elapsed the Safe has auto-resumed to Normal (no separate Resumable state), and a later trigger simply starts a fresh lockdown. Consequences for the relock model:
+**PR #59 update - `triggerLockdown` relaxed to `onlyInitialized`.** `triggerLockdown` is no longer `onlyNormal`; it succeeds in any initialised state (Normal, LockedDown, Recovering). Intended benefit: an operator can EXTEND an active incident on demand - a second panic signal re-locks/extends rather than being forced to pre-commit a long `lockdownDuration`. The canonical flow (runbook §8) is to re-trigger *before* the current window expires: `_lock` sets `lockdownUntil = max(now, lockdownUntil) + lockdownDuration > now`, so the Safe stays LockedDown continuously and never enters Recovering. The remaining time of the current window is preserved: each re-trigger adds a full `lockdownDuration` on top of it, so the operator can re-trigger early without losing freeze time. Re-triggering *during* Recovering is the safety net for a missed window: it re-locks back into LockedDown. Once the recovery window has fully elapsed the Safe has auto-resumed to Normal (no separate Resumable state), and a later trigger simply starts a fresh lockdown. Consequences for the relock model:
 
 - The relock race is no longer strictly *post-resume*: a surviving/compromised signer can now re-lock from within Recovering too, without waiting for the auto-resume to Normal. During the re-locked hard-freeze the quorum cannot `removeLockdownSigner` (owner-path blocked in LockedDown); it can only cull once the window expires back to Recovering, and `triggerLockdown` is permissionless + single-signer while `removeLockdownSigner` needs quorum, so a determined griefer tends to win each race.
-- The worst-case is still **bounded and self-limiting**: each trigger burns one single-use signer (INV-SIGN-7) and no signer can be added during an incident (INV-LIFE-3), so the maximum additional freeze is `≤ (remaining signers) × lockdownDuration`, after which the attacker is exhausted and recovery proceeds. This replaces the pre-#59 bound "a false positive costs exactly one `lockdownDuration + resumeDelay`".
+- The worst-case is still **bounded and self-limiting**: each trigger burns one single-use signer (INV-SIGN-7) and no signer can be added during an incident (INV-LIFE-3), so the total freeze is at most `k × (lockdownDuration + resumeDelay) − (k − 1)` seconds for `k` remaining signers (each Recovering-time re-trigger restarts a full cycle and closes the repair window, H.24), after which the attacker is exhausted and recovery proceeds. This replaces the pre-#59 bound "a false positive costs exactly one `lockdownDuration + resumeDelay`".
 - In the core coercion threat this is not an attacker advantage: a fund-seeking coercer wants the freeze to END, not to be extended, so re-triggering is a pro-victim primitive. The residual is narrow - a pure griefer holding compromised panic keys can impose a bounded recovery delay - and is accepted as the price of on-demand incident extension. Operators size `MAX_LOCKDOWN_SIGNERS` and `lockdownDuration` against this (a smaller `lockdownDuration` re-triggered on demand is preferable to a large fixed one).
 
 ### H.5 Module path cannot administer the singleton
@@ -1160,7 +1211,7 @@ Earlier V1 drafts carried a verifier-class approval flag with separate approval 
 
 ### H.9 Other corrections
 
-- `triggerLockdown` reentrancy comment rewritten: the primary defence is STATICCALL (the verifier is `external view`, so the EVM emits STATICCALL which forbids state mutation in any sub-frame). The pre-tag ordering hardening verifies before removing/burning, then locks; `testSigner` is the single verification source of truth.
+- `triggerLockdown` reentrancy comment rewritten: the primary defence is STATICCALL (the verifier is `external view`, so the EVM emits STATICCALL which forbids state mutation in any sub-frame). The pre-tag ordering hardening verifies before removing/burning, then locks; verification is inline in `triggerLockdown` (the former `testSigner` view was removed, see H.17).
 - `nextSignerId` spec text aligned with the implementation: "last assigned id", not "next free id". Off-chain tooling computes the next id as `nextSignerId + 1`.
 - `getSignerByLookupKey` NatSpec documents the existence convention (`verifier == address(0) ⇒ empty slot`) and explicitly defers the `keccak256(key) == keyHash` re-validation to the off-chain caller.
 - Unused Echidna witness `_saw_revoked_trigger_success` either wired to a new invariant or removed.
@@ -1169,7 +1220,7 @@ Earlier V1 drafts carried a verifier-class approval flag with separate approval 
 
 ### H.10 Superseded on-chain verifier smoke test
 
-The on-chain empty-input verifier smoke test belonged to the removed verifier-approval flow. Current V1 keeps `testSigner(...)` as the explicit drill primitive and leaves verifier-behaviour validation to off-chain tooling and audited codehash pinning.
+The on-chain empty-input verifier smoke test belonged to the removed verifier-approval flow. Current V1 has no on-chain drill primitive (the `testSigner(...)` view was later removed, H.17); drills and verifier-behaviour validation are left to off-chain tooling (`script/DrillSigner.s.sol`) and audited codehash pinning.
 
 ### H.11 `getSignerById` + reverse map (resolves §17 Q2; adds `getSignersByIdRange`)
 
@@ -1183,7 +1234,7 @@ Decision: introduce an on-chain reverse map `mapping(uint64 id => bytes32 lookup
 
 V1-draft `checkModuleTransaction` returned early on `cfg.lockdownDuration == 0` (anti-brick fail-open), and only then enforced `to == address(this) ⇒ revert ModuleCallToSingletonDenied`. Review C1 noted this opens a narrow pre-init bootstrap window: a Safe that has installed the singleton as module guard (`setModuleGuard(address)`) but has not yet been initialised by its owner quorum can have `initialize(...)` (or any other admin function) called from an enabled malicious module via `Safe.execTransactionFromModule(singleton, 0, initCalldata, 0)`. The fail-open returns before the singleton-denied check, the Safe proceeds, and from the singleton's view `msg.sender == Safe`, so the call writes `_configs[Safe]` with attacker-chosen recovery owners, verifiers and signers.
 
-Decision: hoist `if (to == address(this)) revert ModuleCallToSingletonDenied()` to the very first statement of `checkModuleTransaction`, before any state read. The denial is now unconditional in EVERY state (Normal, LockedDown, Recovering, uninit). Anti-brick semantics on the owner path (`checkTransaction`) are unaffected: routine Safe owner traffic does not route through `to == singleton` and uninit owner-path traffic still passes through. This change closes pre-init bootstrap. The corresponding invariant strengthens to "the module path can never reach singleton admin in any state" (INV-LIFE-5 expanded).
+Decision: hoist `if (to == address(this)) revert ModuleCallToSingletonDenied()` to the very first statement of `checkModuleTransaction`, before any state read. The denial is now unconditional in EVERY state (Normal, LockedDown, Recovering, uninit). Anti-brick semantics on the owner path (`checkTransaction`) are unaffected: routine Safe owner traffic does not route through `to == singleton` and uninit owner-path traffic still passes through. This change closes pre-init bootstrap. The corresponding invariant strengthens to "the module path can never reach singleton admin in any state" (INV-LIFE-5 expanded). Note (H.28): this covers DIRECT module calls only. Pre-init, a module could still add an owner it controls and reach `initialize` through the then fail-open owner path. H.28 accepts that residual and closes it operationally (atomic install) rather than with more module-path rules.
 
 ### H.13 Removed `IERC7913KeyValidator` registration gate
 
@@ -1197,7 +1248,7 @@ Current decision: Lockdown only enforces generic key bounds (`1..MAX_KEY_LENGTH`
 - Password: 32-byte non-zero commitment.
 - WebAuthn: 64-byte `qx || qy` P-256 public key, with verifier-specific fixture validation.
 
-This deliberately removes the on-chain `InvalidKeyShape` path and the extra registration-time STATICCALL. The remaining mitigation for accidental inert signers is preflight tooling plus drills using `testSigner(...)` before and after signer registration.
+This deliberately removes the on-chain `InvalidKeyShape` path and the extra registration-time STATICCALL. The remaining mitigation for accidental inert signers is preflight tooling plus off-chain drills (`script/DrillSigner.s.sol` on a local fork) before and after signer registration.
 
 ### H.14 Superseded bulk verifier revoke
 
@@ -1223,26 +1274,11 @@ Decision: add a trailing `bytes32 keyHash` field (non-indexed; the event already
 
 Cost: 1 extra `MLOAD` + 32 bytes of log data per trigger. Off-chain consumers update their ABI subscription to the new event signature `SafeLockedDown(address,uint64,address,uint64,bytes32,bytes32)`.
 
-### H.17 `testSigner` view (Gap 9, pre-approval drill primitive)
+### H.17 `testSigner` view (Gap 9, pre-approval drill primitive) - SUPERSEDED
 
-V1-draft offered only an empty-input private helper and no direct drill primitive. A quorum vetting a candidate verifier (e.g. a new WebAuthn implementation, a candidate MPC scheme) could not exercise the verifier with real `(key, hash, signature)` material. Drilling a registered signer end-to-end was also expensive: a real `triggerLockdown` burns the slot and locks the Safe for `lockdownDuration + resumeDelay`.
+V1-draft offered no direct drill primitive, so H.17 added a public view `testSigner(signer, hash, signature) -> bool` running the trigger's `SignatureChecker` dispatch without burning or mutating state, with the caveat that it was unsafe for password / commit-reveal verifiers (the secret would leak over RPC).
 
-Decision: add the public view
-
-```solidity
-function testSigner(
-    address verifier,
-    bytes calldata key,
-    bytes32 hash,
-    bytes calldata signature
-) external view returns (bool ok, bytes4 returnedMagic);
-```
-
-that replicates `_runVerifier` semantics (STATICCALL with revert normalisation) but returns `(ok, returnedMagic)` instead of reverting and never touches singleton state. It is safe for ECDSA-style and WebAuthn verifiers (signature material is non-secret once produced); UNSAFE for password / commit-reveal verifiers, where the secret would leak over RPC. `PasswordVerifier` (§H.18) ships with exactly this restriction documented: test it only with a throwaway password, never the real one (runbook §8.3.9 tier-2 obligations).
-
-This is NOT a `simulateTriggerLockdown` (no burn skip, no `lockdownUntil` skip): it tests the verifier-only piece. A full drill remains a real `triggerLockdown` followed by a re-`addLockdownSigner` after the automatic return to Normal. Slot reuse makes drills unlimited in count (the cap is on `signersCount`, not `nextSignerId`).
-
-Cost: ~200 B runtime, view-only, no state mutation.
+**Superseded by §H.25: the view has been removed.** A trigger signature is a bearer credential: anyone who obtains it can call `triggerLockdown`, and because `reasonHash` is caller-chosen, a signature produced "for a drill" is just as usable as a real one. A public on-chain drill view encourages operators to send exactly such a signature to an RPC endpoint, where it can be logged or intercepted. `triggerLockdown` now verifies inline (`SignatureChecker.isValidSignatureNow`), and drills run off-chain: `script/DrillSigner.s.sol` executes the same check in a local EVM against a fork (only public state is fetched; nothing is broadcast), and the lifecycle UI verifies ECDSA and WebAuthn signatures locally in the browser. The drill remains runbook-mandatory (§6.4).
 
 ### V1 Timelock (schedule tickets + HSM bypasser)
 
@@ -1311,24 +1347,25 @@ function getModuleTransactionHash(address safe, address module, address to, uint
 `checkModuleTransaction` (Normal mode):
 1. After the existing H.5/H.12 `to == address(this)` denial.
 2. After the existing operation/recovery/lockdown gates.
-3. If `cfg.timelockDelay != 0`:
-   a. **Reentrancy guard (INV-TIME-11)**: revert `ReentrantModuleTimelockExecution` if the transient in-flight slot is set (`_inFlightModuleTicket(safe).tload() != 0`).
-   b. Compute `moduleTxHash = getModuleTransactionHash(safe, module, to, value, data, operation)`, derive the module ticket key, **verify** via `_verifyTicket`.
-   c. Arm the transient in-flight slot (`_inFlightModuleTicket(safe).tstore(ticketKey)`).
-   d. Return the ticket key (Safe v1.5.0 stores and relays it verbatim to the post-hook).
+3. Derive `ticketKey = moduleTxHash.moduleTicketKey()` from `moduleTxHash` (the value returned by `Lockdown.checkModuleTransaction`, equal to `getModuleTransactionHash(safe, module, to, value, data, operation)`).
+4. If `cfg.timelockDelay != 0`, **verify** the ticket via `_verifyTicket` (reverts `TicketNotFound` / `TicketExpired` / `TimelockNotElapsed`).
+5. **Consume** the ticket if one exists (`_consumeTicket`: `delete cfg.ticketExecutableAt[ticketKey]`, emit `TimelockConsumed(safe, ticketKey)`). This happens regardless of `timelockDelay`.
+6. Return `moduleTxHash` (Safe v1.5.0 stores and relays it verbatim to the post-hook).
 
-`checkAfterModuleExecution(txHash, success)` (V1 review round 3 INV-TIME-4 + INV-TIME-11 hardening):
-1. Read `pending = _inFlightModuleTicket(safe).tload()`. If 0, return immediately (no in-flight tx; covers no-timelock branch and uninit).
-2. Clear the transient slot (`_inFlightModuleTicket(safe).tstore(0)`) regardless of `success` so the next module-path timelocked tx can begin (failure paths must not brick the path).
-3. If `success == false`, return (Safe v1.5.0 `ExecutionFromModuleFailure` path; ticket survives for retry with identical params).
-4. If `cfg.ticketExecutableAt[pending] == 0`, return (defence in depth against Safe v1.5.0 quirks).
-5. Else `delete cfg.ticketExecutableAt[pending]` and emit `TimelockConsumed(safe, pending)`.
+`checkAfterModuleExecution(moduleTxHash, success)` (V1 review round 3 INV-TIME-4 hardening):
+1. If `success == true`, return (the ticket stays consumed).
+2. If `cfg.timelockDelay == 0`, return (the pre-hook did not verify the ticket, so it is not restored).
+3. Else re-create the ticket: `cfg.ticketExecutableAt[moduleTxHash.moduleTicketKey()] = block.timestamp`, emit `TicketRestored(safe, ticketKey, block.timestamp)` (Safe v1.5.0 `ExecutionFromModuleFailure` path; the operator can retry with identical params).
 
-The in-flight slot lives in **transient storage** (EIP-1153), keyed per Safe via an ERC-7201 base slot (`IN_FLIGHT_TICKET_BASE_SLOT.deriveMapping(safe)`, see #18). It is scoped to the single transaction, so it needs no persistent cleanup beyond the post-hook clear and cannot leak across transactions.
+Pre-hook consumption makes module-path single-use structural (INV-TIME-11): during execution the ticket no longer exists, so a nested re-execution of the same module tx reverts `TicketNotFound`. No transient state is needed, and nested module txs with distinct tickets are allowed.
 
-The `txHash` parameter is part of the Safe v1.5.0 interface contract but is NOT used for the storage key - the transient in-flight slot is authoritative. This makes a malicious caller spoofing the post-hook with someone else's ticket key impossible to exploit cross-Safe: the spoofer's transient in-flight slot is 0 (they have no in-flight tx of their own) so the early return fires.
+Consumption is NOT gated on `timelockDelay` (mirrors the owner path). A module ticket scheduled while the timelock was active and executed after `setTimelockDelay(0)` is still consumed, so it cannot be replayed without a wait once the timelock is re-enabled (`0 → N` is immediate, and module ticket keys carry no nonce). While the timelock is disabled a failed module call burns its ticket: the ticket is not needed to execute, and at worst the quorum re-schedules it if the timelock is re-enabled.
 
-Post-hook consumption (Q-Bypass-6 / Q6, V1 review round 3): the ticket is deleted ONLY after the inner call completed successfully. This closes the Safe v1.5.0 execution-semantics gap flagged by the audit: with the previous pre-hook delete, a failed module call (Safe catches the revert and emits `ExecutionFromModuleFailure`, outer tx commits) burned the ticket and forced a full re-schedule + re-wait. Same gap for owner-path with `safeTxGas > 0`: Safe may commit the outer tx despite the inner revert.
+Restore semantics: the restored ticket has `executableAt = block.timestamp`, not its original value. While `timelockDelay > 0`, the pre-hook verified the ticket was executable, so this never shortens the wait. It does restart the `TICKET_TTL` window: every failed attempt extends the ticket's lifetime, including attempts by third parties when the module can be triggered permissionlessly. The quorum can still `cancelModuleTransaction` at any time in Normal (accepted trade-off, compare the bypasser refresh in `test_confirmed_bypasserRefreshesTicketIndefinitely`). `timelockDelay` cannot differ between the two hooks on a failure path, since the failed inner call (including any nested `setTimelockDelay`) is reverted.
+
+The post-hook can write a ticket for an arbitrary `moduleTxHash`, so it MUST only be reachable through Safe's own module execution. A Safe cannot call it as the `to` of its own transaction (`GuardHookSelfCallDenied`, checked on every path including inside MultiSend batches, and DELEGATECALL is restricted to `MultiSendCallOnly`). Any other caller only writes to its own `_configs[msg.sender]` entry (cross-Safe isolation).
+
+Success-gated consumption (Q-Bypass-6 / Q6, V1 review round 3): a failed call never burns a ticket while the timelock is active. This closes the Safe v1.5.0 execution-semantics gap flagged by the audit: with a bare pre-hook delete, a failed module call (Safe catches the revert and emits `ExecutionFromModuleFailure`, outer tx commits) burned the ticket and forced a full re-schedule + re-wait. Owner-path achieves the same by deleting in the post-hook only on success: Safe may commit the outer tx despite an inner revert when `safeTxGas > 0`.
 
 **Residual operator surface (owner-path `safeTxGas > 0` only)**: when the operator's outer Safe tx commits with `safeTxGas > 0` but the inner call reverts, the post-hook fires with `success == false` and the ticket survives. The Safe nonce has advanced, so a same-params replay requires a NEW schedule at the new nonce. The leftover ticket is dead weight reclaimable via `cancelTransaction(oldHash)` or the 90-day TTL sweep. With `safeTxGas == 0` (and `gasPrice == 0`), an inner revert rolls back the entire outer tx including the pre-hook verify - the operator can simply retry at the same nonce. **Operators SHOULD prefer `safeTxGas == 0` for timelocked owner txs** (Safe v1.4.0+ recommendation independently).
 
@@ -1369,7 +1406,7 @@ Why permissionless: the sweep is storage hygiene. Once the ticket is expired it 
 
 #### Setters and the timelock
 
-All setters (the existing `setLockdownDuration`, `setResumeDelay`, `addRecoveryOwner`, `removeRecoveryOwner`, `addLockdownSigner`, `removeLockdownSigner`, `rotateLockdownSigner`, and the new `setTimelockDelay`, `setTimelockBypasser`) are owner-path self-calls. Once `timelockDelay > 0`, they all go through the timelock check in `checkTransaction`. The user must schedule + wait + execute each. The only "free" change is an activation `0 -> N` of `setTimelockDelay`, because the hook check is `if (cfg.timelockDelay != 0)` and `cfg.timelockDelay` is still 0 at the moment of the activation tx. Note this is mechanically EVERY `0 -> N` transition, not only the first: after a (timelocked) `N -> 0` disable, the next re-activation is free again.
+All setters (the existing `setLockdownDuration`, `setResumeDelay`, `setErc1271Allowed` (H.27), `addRecoveryOwner`, `removeRecoveryOwner`, `addLockdownSigner`, `removeLockdownSigner`, `rotateLockdownSigner`, and the new `setTimelockDelay`, `setTimelockBypasser`) are owner-path self-calls. Once `timelockDelay > 0`, they all go through the timelock check in `checkTransaction`. The user must schedule + wait + execute each. The only "free" change is an activation `0 -> N` of `setTimelockDelay`, because the hook check is `if (cfg.timelockDelay != 0)` and `cfg.timelockDelay` is still 0 at the moment of the activation tx. Note this is mechanically EVERY `0 -> N` transition, not only the first: after a (timelocked) `N -> 0` disable, the next re-activation is free again.
 
 This is enforced by hook position (no per-setter logic), making the design auditable in one place.
 
@@ -1377,21 +1414,21 @@ This is enforced by hook position (no per-setter logic), making the design audit
 
 New errors: `TimelockDisabled`, `TimelockDelayTooLow`, `TimelockDelayTooHigh`, `TimelockExceedsLockdownDuration`, `TicketAlreadyExists`, `TicketNotFound`, `TimelockNotElapsed`, `TicketExpired`, `TicketNotExpired`, `NotTimelockBypasser`, `BypasserZeroAddress`, `TimelockBypassRefundDenied`, `LockdownSigners_BurntPermanently`.
 
-New events: `TimelockDelayChanged`, `TimelockBypasserChanged`, `TransactionScheduled`, `ModuleTransactionScheduled`, `TicketCancelled`, `TicketSwept`, `TimelockBypassed`, `TimelockConsumed`.
+New events: `TimelockDelayChanged`, `TimelockBypasserChanged`, `TransactionScheduled`, `ModuleTransactionScheduled`, `TicketCancelled`, `TicketSwept`, `TimelockBypassed`, `TimelockConsumed`, `TicketRestored`.
 
 #### Invariants (new)
 
 - **INV-TIME-1**: a transaction reaches the Safe execution layer only if `cfg.timelockDelay == 0` OR a matching ticket existed with `block.timestamp >= executableAt && block.timestamp <= executableAt + TICKET_TTL`, where the matching ticket is `_ownerTicketKey(safeTxHash)` (owner-path) or `_moduleTicketKey(moduleTxHash)` (module-path) - with exactly four documented no-ticket carve-outs: (a) the cancel / module-schedule / module-cancel meta-call short-circuit (INV-TIME-3), (b) the inline bypasser-as-submitter form (README assumption 5), (c) recovery-whitelisted calls (INV-TIME-6: the timelock branch is not reached outside Normal), and (d) an explicit `bypassTimelock(hash)` which creates-then-satisfies the ticket.
 - **INV-TIME-2**: `bypassTimelock` reverts `NotTimelockBypasser` for any caller not in `timelockBypassers[caller]`. The mapping is per-Safe (INV-ISO-1 extension).
 - **INV-TIME-3**: `_isTimelockManagementCall` returns true only for owner-path self-calls to `address(this)` with `value == 0` and selectors equal to `cancelTransaction(bytes32)`, `scheduleModuleTransaction(...)`, or `cancelModuleTransaction(bytes32)`. Owner scheduling is out-of-band through `scheduleTransaction(...)`, not a Safe self-call. Strict length is enforced for owner cancel; module meta-calls are selector-only and malformed calldata reverts in the called function.
-- **INV-TIME-4 (V1 review round 3 hardening, two-layer)**: ticket consumption is single-use AND success-gated AND reentrancy-protected. (a) Success-gating: a successful execution (`success == true` in the post-hook) deletes the entry; a failed execution leaves the entry consumable for retry. (b) Reentrancy-protection (module-path only, see INV-TIME-11): the in-flight slot blocks a same-Safe reentrant pre-hook from verifying the same ticket twice. Owner-path single-use is structurally enforced by Safe nonce ordering (distinct nonces produce distinct `safeTxHash` values, hence distinct ticket keys). Subsequent attempts after a successful delete revert `TicketNotFound`. The pre-hook (`checkTransaction` / `checkModuleTransaction`) only verifies; the actual `delete cfg.ticketExecutableAt[ticketKey]` lives in `checkAfterExecution` / `checkAfterModuleExecution`. Closes the Safe v1.5.0 execution-semantics gap: `execTransactionFromModule` catches inner reverts and commits the outer tx, and `execTransaction` with `safeTxGas > 0` may do the same. Owner-path residual when `safeTxGas > 0`: the nonce has advanced so a leftover ticket is unusable at the new nonce (operator cleans via `cancelTransaction` or 90-day TTL sweep). Verified by `test_moduleHook_postHookFailure_leavesTicketForRetry`, `test_moduleHook_postHookWithoutTicket_isNoOp`, `test_ownerHook_postHookFailure_leavesTicketForCleanup`, `test_ownerHook_postHookWithoutTicket_isNoOp`, `test_postHook_crossSafeIsolation`, `test_moduleHook_reentrantPreHookReverts_INV_TIME_11`, `test_moduleHook_inFlightClearedOnFailure`.
+- **INV-TIME-4 (V1 review round 3 hardening, two-layer)**: ticket consumption is single-use AND success-gated AND reentrancy-protected. (a) Success-gating: a successful execution consumes the entry; a failed execution leaves the entry consumable for retry while the timelock is active. Owner-path: `checkTransaction` only verifies, and `checkAfterExecution` deletes on `success == true`. Module-path: `checkModuleTransaction` verifies and deletes, and `checkAfterModuleExecution` re-creates the entry (`executableAt = block.timestamp`, `TicketRestored`) on `success == false` while `timelockDelay > 0`. (b) Reentrancy-protection (module-path, see INV-TIME-11): the ticket is gone while the module call runs, so a same-Safe reentrant pre-hook cannot verify it twice. Owner-path single-use is structurally enforced by Safe nonce ordering (distinct nonces produce distinct `safeTxHash` values, hence distinct ticket keys). Subsequent attempts after a successful execution revert `TicketNotFound`. Closes the Safe v1.5.0 execution-semantics gap: `execTransactionFromModule` catches inner reverts and commits the outer tx, and `execTransaction` with `safeTxGas > 0` may do the same. Owner-path residual when `safeTxGas > 0`: the nonce has advanced so a leftover ticket is unusable at the new nonce (operator cleans via `cancelTransaction` or 90-day TTL sweep). Verified by `test_moduleHook_postHookFailure_leavesTicketForRetry`, `test_moduleHook_postHookWithoutTicket_isNoOp`, `test_ownerHook_postHookFailure_leavesTicketForCleanup`, `test_ownerHook_postHookWithoutTicket_isNoOp`, `test_postHook_crossSafeIsolation`, `test_moduleHook_reentrantPreHookReverts_INV_TIME_11`, `test_moduleHook_failureRestoresTicketWithFreshTtl`, `test_moduleHook_postHookFailureWithoutTimelock_isNoOp`.
 - **INV-TIME-5**: revocation of a bypasser is prospective. `bypassTimelock(safe, h)` calls made BEFORE revocation are not invalidated; the ticket stays until cancelled / executed / TTL-expired.
 - **INV-TIME-6**: timelock PRE-checks do NOT apply during LockedDown or Recovering. The pre-hook branches on `getState` before the Normal-mode `_verifyOwnerTimelock` call. Recovery-whitelisted owner-path ops and the unconditional module-path revert both bypass the timelock verification entirely. Note the success-gated POST-hook consumption (`checkAfterExecution` → `_consumeTicket`) is NOT state-gated and can consume a matching pre-incident ticket during Recovering (see "Recovery interaction" above); the invariant covers verification, not post-hook cleanup.
 - **INV-TIME-7**: `bypassTimelock` reverts `InvalidState` via `onlyNormal` whenever `getState(safe)` is LockedDown or Recovering. It is allowed again after time-based auto-resume even if raw elapsed incident fields still linger. Combined with INV-TIME-6, the bypasser cannot interact with Safe state during an active incident even if its key is compromised at that moment. Stateful Echidna invariant `echidna_bypassRejectedDuringIncident` verifies the live witness.
 - **INV-TIME-8**: `sweepExpiredOwnerTicket` / `sweepExpiredModuleTicket` succeed only when `block.timestamp > executableAt + TICKET_TTL`. On success the ticket disappears: its storage slot is deleted and an immediate subsequent read returns 0. This property says nothing about terminal revocation of the underlying Safe authorisation. In particular, deleting an owner-ticket slot does not invalidate the owner signatures carried in the public `scheduleTransaction` calldata; while their signed nonce has not been surpassed, those signatures can recreate a new ticket that must wait `timelockDelay` again. The sweep remains state-gate free (Normal, LockedDown, Recovering) because the expired ticket itself cannot pass the hook. Echidna witness `echidna_sweepClearsExpiredOwnerTicketSlot` proves only the slot-clearing property; `test/poc/TicketRevival.t.sol` pins survival of the owner authorisation.
 - **INV-TIME-9 (C1 fix)**: any owner-path tx that takes the `_isTimelockManagementCall` short-circuit MUST also have `safeTxGas == 0 && baseGas == 0 && gasPrice == 0 && gasToken == address(0) && refundReceiver == address(0)`. The hook reverts `TimelockBypassRefundDenied` otherwise. Prevents a coerced quorum from draining via Safe refund mechanics on the bypass path.
-- **INV-TIME-10 (V1 review round 3)**: the post-hook delete is bound to the pre-hook verify via the `safeTxHash` (owner) or the transient in-flight slot (module). Both hooks read `_configs[msg.sender]` only (cross-Safe isolation preserved: a malicious Safe calling the post-hook with another Safe's ticket key cannot delete that ticket). The post-hook is idempotent: a second call with the same args is a no-op (existence guard).
-- **INV-TIME-11 (V1 review round 3 Prompt-3 follow-up, reentrancy guard)**: a module-path timelocked execution that is in-flight on a Safe blocks any concurrent `checkModuleTransaction` on the same Safe. the transient in-flight slot (`_inFlightModuleTicket(safe)`) is armed by the pre-hook when the timelock branch verifies a ticket and cleared by the post-hook regardless of `success`. A reentrant `execTransactionFromModule(sameParams)` (target → module → Safe pattern) hits the non-zero in-flight slot in the inner pre-hook and reverts `ReentrantModuleTimelockExecution`. Closes the Safe v1.5.0 reentrancy double-spend window flagged by the Prompt-3 audit: without the guard, an outer module tx whose target reenters with identical params would verify the same ticket twice (verify-only pre-hook) and the inner post-hook would delete it - net result two executions from one ticket. Owner-path is structurally immune because Safe nonce ordering produces distinct `safeTxHash` values across nested `execTransaction` calls; the slot covers module-path only. Verified by `test_moduleHook_reentrantPreHookReverts_INV_TIME_11` and `test_moduleHook_inFlightClearedOnFailure`.
+- **INV-TIME-10 (V1 review round 3)**: the post-hook is bound to the pre-hook via the relayed `safeTxHash` (owner: delete on success) or `moduleTxHash` (module: restore on failure). Both hooks read `_configs[msg.sender]` only (cross-Safe isolation preserved: a malicious Safe calling the post-hook with another Safe's ticket key cannot touch that ticket). A Safe cannot invoke the post-hooks itself (`GuardHookSelfCallDenied`), which matters for the module post-hook since it writes tickets. The owner post-hook is idempotent: a second call with the same args is a no-op (existence guard).
+- **INV-TIME-11 (V1 review round 3 Prompt-3 follow-up, reentrancy)**: a module-path timelocked ticket cannot be used twice by reentrancy. The module pre-hook consumes the ticket before execution, so a reentrant `execTransactionFromModule(sameParams)` (target → module → Safe pattern) finds no ticket in the inner pre-hook and reverts `TicketNotFound`. Closes the Safe v1.5.0 reentrancy double-spend window flagged by the Prompt-3 audit: with a verify-only pre-hook and post-hook deletion, an outer module tx whose target reenters with identical params would verify the same ticket twice - net result two executions from one ticket. Nested module txs with distinct tickets are unaffected. Owner-path is structurally immune because Safe nonce ordering produces distinct `safeTxHash` values across nested `execTransaction` calls. Verified by `test_moduleHook_reentrantPreHookReverts_INV_TIME_11` and `test_timelock_module_nestedReplayOfSameTxIsRejected`.
 
 #### Burnt-identity set (INV-SIGN-7, C4 fix)
 
@@ -1431,6 +1468,7 @@ PasswordVerifier ships as tier-2 production (§H.18) with a publicly-known weakn
 - **T-PWD-REPLAY (re-registration replay, C4)**: **fixed on-chain by INV-SIGN-7** (per-Safe `signerBurntPermanently` set). Any identity that has been registered and subsequently removed / rotated-away / trigger-burnt is permanently blocked from re-registration on the same Safe (`LockdownSigners_BurntPermanently`). A PasswordVerifier preimage that has leaked publicly cannot be re-armed under the same identity - the operator MUST rotate to a fresh identity. Verified by unit tests `test_passwordPath_replayAfterReRegistrationBlocked` and `test_addLockdownSignerRejectsBurntKeyAfterTriggerBurn`.
 - **T-PWD-LEAK-BEFORE-BURN (revert-before-burn leak, C5)**: **accepted operator risk, not on-chain fixed**. The `triggerLockdown` pre-verify checks can revert AFTER the preimage is publicly in calldata but BEFORE the verifier runs and the burn fires. Since PR #59 relaxed the gate from `onlyNormal` to `onlyInitialized`, a duplicate trigger during an active lockdown no longer reverts - it SUCCEEDS and burns the identity (extending the lockdown), so that formerly-most-realistic leak case is gone. The remaining revert-before-burn cases are: a wrong/mismatched `signature` (`BadSignature`, burn rolled back), an unregistered/already-burnt identity (`NotLockdownSigner`), or an uninitialised Safe (`InvalidState`; moot, no identity registered). **Operator obligation**: treat any reverted password trigger as a full leak and rotate to a fresh commitment IMMEDIATELY (via `removeLockdownSigner` during Recovering, or in Normal).
 - **T-PWD-MEMPOOL (cleartext mempool observation)**: documented in `PasswordVerifier` NatSpec and runbook §8.3 tier-2 warning. Every successful trigger publishes the preimage. The on-chain burn + INV-SIGN-7 contain damage to the SAFE that was triggered; cross-Safe reuse leaks across all Safes that share the same commitment. Because `PasswordVerifier` ignores the EIP-712 digest, a password commitment is unique **per Safe AND per chain**.
+- **T-PWD-MULTI-IDENTITY (one commitment under two identities, external audit NM-1060)**: **accepted operator risk, not on-chain fixable**. The `signer` field of the trigger message (§H.23) cannot bind a verifier that ignores the digest. If one commitment is registered under two identities on the same Safe (two `PasswordVerifier` deployments, or any other verifier that accepts the same preimage), the first trigger publishes the preimage and anyone can replay it through the second identity: one extra freeze and one burnt identity. Operator obligation: a commitment is registered under exactly one identity. Pinned by `test/poc/TriggerIdentityBinding.t.sol::test_limitation_passwordCommitmentUnderTwoIdentitiesIsReplayable`.
 
 ### H.18 `PasswordVerifier` reintroduced as production verifier (V1)
 
@@ -1477,7 +1515,7 @@ Changes:
 
 Both PoCs now revert. Regressions: `test_module_setFallbackHandler_deniedFor{Valid,Foreign}Handler`, `test_moduleHook_selfAdminSetFallbackHandlerDenied`, `test_ownerHook_guardHookSelectorsDeniedAsSingletonTarget`, `test_moduleHook_canStillAddOwner_acceptedNormalModePower` (plus the pre-existing `test_module_setGuardSelfCall_rejected` / `test_module_setModuleGuardSelfCall_rejected`).
 
-Residual (accepted): a malicious enabled module in Normal mode retains full owner-equivalent power over the Safe (add owners/modules, move funds) - inherent to Safe's module model and out of scope. The Lockdown guarantee is that once a lockdown is triggered the guard freezes everything, and H.20 ensures a module cannot pre-emptively disable that guard.
+Residual (accepted, corrected by H.28): H.20 is a DIRECT-CALL guarantee, not an authority guarantee. A module cannot itself call `setGuard` / `setModuleGuard` / `setFallbackHandler` or the singleton, but it can add an owner it controls (`addOwnerWithThreshold(attacker, 1)`) and that owner then holds every owner-path power, including removing the guard and administering the singleton. When `timelockDelay > 0` those owner-path actions need a fresh full delay; at delay 0 (and on base `Lockdown`) they do not. Before initialize the owner path is fail-open, so the same escalation also reaches `initialize`; H.28 keeps that residual and requires the atomic install. Once a lockdown is triggered the guard still freezes both paths, so the escalation must complete before the incident. Monitoring obligation: alert off-chain on `AddedOwner` / `RemovedOwner` / `ChangedThreshold` inside module transactions (§14).
 
 ### H.21 Prospective `resumeDelay` updates cannot resurrect an elapsed incident (F-M2-01)
 
@@ -1506,7 +1544,8 @@ time-based and event-less. Closure is pinned at the exact recovery boundary by
 ### H.22 Verify before remove/burn in `triggerLockdown` (pre-tag arbitration)
 
 `triggerLockdown` now preserves the cheap registered-identity check, verifies
-through the public `testSigner` source of truth, then removes and permanently
+the signature inline (originally through the public `testSigner` view, since
+removed - H.17), then removes and permanently
 burns the identity before `_lock`. Verification therefore observes no
 singleton mutation introduced by the trigger. Failed verification performs no
 burn; a later failure still rolls the successful verification, burn and lock
@@ -1521,6 +1560,327 @@ the supported behavioural guarantees. Any verifier OOG, revert or invalid
 return condemns the whole identity and requires removal/rotation to a different
 verifier. No verifier gas ceiling or local bounded-returndata fork of OZ
 `SignatureChecker` is introduced for V1.
+
+### H.23 Bind the signer identity in the trigger message (external audit NM-1060)
+
+**Finding (Low): trigger signatures could be replayed against a second identity
+that wraps the same key.** The trigger message was `Lockdown(address safe,bytes32
+reasonHash)` and did not name the signer, while the burnt register (INV-SIGN-7) is
+keyed by exact identity bytes. The same key material registered under two
+identities therefore yielded two identities accepting one signature: the same
+passkey as `WebAuthnVerifier || K` and `WebAuthnVerifierNoUV || K` (a UV assertion
+is valid under both), one key under two deployments of the same verifier, or an
+EOA next to an ERC-1271 wallet that validates that EOA's raw signatures. After the
+first identity triggered, any address could replay the public signature through
+the second one, burning it and re-running `_lock` (from Recovering, back to
+LockedDown). This contradicted the §2 row 6 claim that replay safety rests on the
+burn alone.
+
+**Fix.** `LOCKDOWN_TYPEHASH` is now `Lockdown(address safe,bytes signer,bytes32
+reasonHash)` and `triggerLockdown` hashes `keccak256(signer)` into the struct
+(§5.2, INV-AUTH-1). A signature is valid only for the identity it was produced
+for, so the burn of that identity is again the complete replay story for every
+verifier that checks the digest. Wallets display the identity bytes as a typed
+field (`docs/clear-signing/eip712-lockdown-1.json`). Pinned by
+`test/poc/TriggerIdentityBinding.t.sol`: one `test_regression_*` per pairing in
+the finding, each replayed by an address with no signer role from Recovering,
+plus a positive control.
+
+**Residual (accepted).** No message field can bind a verifier that ignores the
+digest. `PasswordVerifier` is one: a commitment registered under two identities
+stays replayable once either fires (T-PWD-MULTI-IDENTITY, §H.18). The operator
+rule is that a commitment is registered under exactly one identity, alongside the
+existing per-Safe and per-chain uniqueness rules.
+
+### H.24 Re-triggers stack on the active lockdown window (post-audit)
+
+`_lock` computed `lockdownUntil = now + lockdownDuration`, so a re-trigger
+while LockedDown replaced the remaining window instead of adding to it: an
+operator extending early lost the time left, and the canonical "extend before
+expiry" flow (PR #59 notes, §14) had to be timed close to the end. `_lock` now
+computes `lockdownUntil = max(now, lockdownUntil) + lockdownDuration` (§5.2,
+INV-LIFE-2):
+
+- LockedDown: the new window stacks on the current one; N triggers in one block
+  freeze for `N × lockdownDuration` (then `resumeDelay`).
+- Recovering or Normal: `lockdownUntil <= now`, so behaviour is unchanged (the
+  window starts from `now`).
+
+The worst-case freeze is not raised by stacking: each trigger still burns one
+signer (INV-SIGN-7) and none can be added during an incident (INV-LIFE-3). With
+`k` surviving signers, `k` triggers inside LockedDown freeze for `k × D + R`.
+The true maximum (NM-1060 6.8, Info) is reached instead by re-triggering at the
+last second of each Recovering window: `k × (D + R) − (k − 1)` seconds, about
+1,184 days at the caps (k = 32, D = 30 d, R = 7 d), because each such
+re-trigger starts from `now` (`lockdownUntil <= now` in Recovering) and pays
+`R` again. A re-trigger during Recovering returns the Safe to LockedDown and
+closes the repair window: `removeLockdownSigner`, `swapOwner` and
+`disableModule` are owner-path calls, blocked while LockedDown, so the quorum
+can only cull the surviving signer once that freeze expires back to Recovering.
+This bound replaces the earlier `S × D + R` (≈ 967 d) stated in AR-14 and §14.
+Operational consequence: concurrent triggers by several guardians are no longer
+nearly idempotent, each adds a full `lockdownDuration`; the runbook designates
+one guardian to fire first (`docs/V1_USER_SCENARIOS.md` §3.1). Pinned by
+`test_triggerLockdownExtendsWhenAlreadyLockedDown` and
+`test_triggerLockdownStacksInSameBlock`; the k = 2 worst case is pinned to the
+second by `test_triggerLockdownWorstCaseBoundForTwoTriggers`; the Recovering
+and post-auto-resume cases keep their existing tests.
+
+### H.25 Remove the on-chain drill view (external audit NM-1060)
+
+**Finding (Low): drill signatures produced with `testSigner(...)` remain valid
+triggers.** H.17's view verified a signature without burning the identity, and
+§6.4 made the drill mandatory over the exact trigger digest. The drill
+signature was therefore a valid trigger for as long as the identity stayed
+registered, and the natural way to drill was an `eth_call` to an RPC provider:
+the provider, a log pipeline or anyone downstream could later lock the Safe at
+a time of their choosing (`lockdownDuration + resumeDelay`) and burn one panic
+identity. The NatSpec presented the drill as safe for ECDSA, ERC-1271 and
+WebAuthn signatures.
+
+**Answer.** The view is removed and `triggerLockdown` verifies inline with
+`SignatureChecker.isValidSignatureNow` (§5.2, INV-SIGN-1; verify-then-burn
+unchanged). Drills run off-chain (§6.4): `script/DrillSigner.s.sol` rebuilds
+the trigger digest and runs the same check in a local fork, fetching only
+public state and never broadcasting, and the lifecycle UI checks ECDSA and
+WebAuthn signatures in the browser without sending them to the RPC. The drill
+signature no longer has to leave the operator's machine.
+
+The finding's first recommendation (a drill flag, domain or expiry that
+`triggerLockdown` rejects) was not taken: a drill is only meaningful if it
+verifies the exact digest the trigger will verify, so a drill-only digest would
+stop proving that the trigger works.
+
+**Residual (accepted).** A signature that passes the drill is, by construction,
+a valid trigger until its identity is burnt or removed. NatSpec, the drill
+script and the runbook (`docs/V1_USER_SCENARIOS.md` §2.1) now say so, and give
+the remedy: keep it local, discard it, and rotate the identity in Normal if it
+may have leaked. Pinned by `test/poc/DrillSignatureExposure.t.sol`
+(`test_regression_noOnChainDrillView`,
+`test_limitation_offChainDrillSignatureIsALiveTrigger`,
+`test_control_rotationRevokesALeakedDrillSignature`).
+
+### H.26 Module tickets are consumed in the pre-hook (external audit NM-1060 6.6)
+
+**Finding (Low): a module ticket survived its execution when the timelock was
+disabled.** `checkModuleTransaction` armed the in-flight ticket only while
+`timelockDelay > 0`, so with the delay at 0 `checkAfterModuleExecution` had
+nothing to consume. Module ticket keys bind no nonce, so the sequence
+schedule X, wait, `setTimelockDelay(0)`, execute X, `setTimelockDelay(N)` (the
+`0 → N` activation is immediate) let the module replay X with no new wait for
+as long as the original `TICKET_TTL` window lasted. The owner path was not
+affected: `checkAfterExecution` consumes at any delay and owner keys include
+the Safe nonce.
+
+**Fix.** Consumption moves to the pre-hook and no longer depends on the delay
+(§ module hooks, INV-TIME-4, INV-TIME-10, INV-TIME-11). In Normal,
+`checkModuleTransaction` verifies the ticket when `timelockDelay > 0`, then
+consumes any matching ticket at every delay. `checkAfterModuleExecution`
+re-creates it (`executableAt = block.timestamp`, new event `TicketRestored`)
+only when the call failed AND `timelockDelay > 0`. Because the ticket no longer
+exists while the module call runs, a nested re-execution of the same module
+tx reverts `TicketNotFound`: INV-TIME-11 holds structurally, without the
+transient in-flight slot, and `ReentrantModuleTimelockExecution` is removed.
+The delay read by the post-hook is the one the pre-hook saw: a failed
+`execTransactionFromModule` call reverts its whole frame, including any nested
+`setTimelockDelay`. The post-hook can write a ticket for an arbitrary hash, so
+it must only be reachable through Safe's own module execution; the
+`GuardHookSelfCallDenied` check (H.20) on every path is what guarantees it.
+
+**Accepted trade-offs.** A restored ticket restarts its `TICKET_TTL` window;
+a failed call at delay 0 burns the ticket (it was never verified, so it is
+not restored); indexers see `TimelockConsumed` followed by `TicketRestored`
+for a failed call. This entry supersedes the post-hook consumption design of
+the earlier draft (#98), which needed a frame-depth counter to avoid the same
+double-spend.
+
+**Pinned by** `test/LockdownTimelock.t.sol`
+(`test_moduleHook_failureRestoresTicketWithFreshTtl`,
+`test_moduleHook_postHookFailureWithoutTimelock_isNoOp`),
+`test/integration/SafeIntegration.t.sol` on a real Safe v1.5.0
+(`test_timelock_module_ticketConsumedAfterTimelockDisabled`,
+`test_timelock_module_failedCallRestoresTicket`,
+`test_timelock_module_failedCallBurnsTicketWhenTimelockDisabled`,
+`test_timelock_module_nestedReplayOfSameTxIsRejected`,
+`test_timelock_module_nestedCallDoesNotSkipOuterConsumptionAfterTimelockDisabled`)
+and the Echidna property `echidna_moduleTicketSingleUse`.
+
+### H.27 ERC-1271 is a per-Safe operator choice, disabled by default (NM-1060 6.1)
+
+Finding (external audit NM-1060 6.1, High): `LockdownFallbackHandler.isValidSignature`
+read only the incident state. In Normal it validated owner signatures, inline
+via `checkSignatures` or, for an empty signature, via `safe.signedMessages`,
+and never consulted the timelock. A coerced quorum could sign an EIP-3009
+`transferWithAuthorization` or a permit on a token that verifies contract
+wallets through ERC-1271 (USDC, EURC, PYUSD), a Permit2 transfer, a CoW or
+Seaport order, and the attacker settled it immediately: no `execTransaction`,
+therefore no guard hook, therefore zero reaction window despite
+`timelockDelay > 0`. `signedMessages` is a permanent, non-revocable Safe
+boolean; entries written before the Lockdown install stay valid, while new
+ones cannot be created afterwards because the guard denies `DELEGATECALL` to
+`SignMessageLib`.
+
+Decision: ERC-1271 becomes an explicit per-Safe operator choice made
+when configuring Lockdown. The contract default is disabled (fail-closed);
+the operator tooling proposes it enabled at install for a Safe without a
+timelock, and proposes turning it off when the timelock is activated, the
+operator deciding in both cases. Rationale: an off-chain
+signature never passes through a guard hook, so it can never get a timelock
+reaction window, and an incident only defers it: it validates again after
+auto-resume. A Safe that does not need off-chain signing should not carry that
+surface at all. Enabling it is a documented, owner-path, timelocked choice;
+with ERC-1271 allowed AND `timelockDelay > 0`, NM-1060 6.1 is an
+operator-accepted residual (§14, AUDIT_BRIEF AR-15). An earlier draft of this
+fix disabled ERC-1271 automatically whenever `timelockDelay > 0` (via an
+ERC-165 flavour probe in the handler); it is superseded by this rule and was
+never released.
+
+Design:
+- Storage: `mapping(address safe => bool) _erc1271Allowed` in its own mixin
+  `src/base/Erc1271Policy.sol`, inherited by the base `Lockdown`, so both
+  `Lockdown` and `LockdownTimelock` carry it. It is kept out of
+  `StateMachine.SafeConfig` on review: the flag is not part of the lockdown
+  lifecycle that `StateMachine` tracks. Cost: one extra cold SLOAD per
+  ERC-1271 validation instead of a warm one (~2,000 gas), plus ~15,000 gas
+  on the first `false -> true` write because it now changes a dedicated slot
+  from zero to non-zero instead of updating an already non-zero packed slot.
+  Default `false`
+  means DISABLED (fail-closed), including for an uninitialised Safe and for
+  any Safe after a migration to a fresh singleton. No other code path writes
+  it; `_lock`, auto-resume and `_setResumeDelay` leave it untouched.
+- Setter: `setErc1271Allowed(bool)` keyed by `msg.sender`, `onlyNormal` like
+  the other config setters, emits `Erc1271AllowedChanged(safe, allowed)`
+  (§6.1). Rejected before `initialize` (`InvalidState`); allowed after
+  `initialize` in the same install MultiSend. Not a timelock meta-call
+  (`_isTimelockManagementCall` lists only `cancelTransaction`,
+  `scheduleModuleTransaction`, `cancelModuleTransaction`), so with
+  `timelockDelay > 0` enabling and disabling both need schedule + wait +
+  execute (or a registered bypasser as submitter, consistent with the
+  bypasser's full owner-path authority). Module path:
+  `ModuleCallToSingletonDenied`, direct or nested in a MultiSend. Not on the
+  recovery whitelist. A third party calling it writes only its own
+  (uninitialised, hence rejected) entry.
+- Getter: `isErc1271Allowed(address safe)`. Kept out of `getConfigSnapshot`
+  to leave its 5-field ABI unchanged for the off-chain consumers (§6.4).
+- Handler: after the unchanged incident gate (`SignaturesFrozenDuringLockdown`
+  in LockedDown / Recovering, whatever the flag), `isValidSignature` reverts
+  `Erc1271Disabled` unless `LOCKDOWN.isErc1271Allowed(safe)`. The check runs
+  before both branches, so the inline `checkSignatures` path and the
+  `signedMessages` path (including pre-install entries) are gated alike. The
+  handler stays a verbatim `CompatibilityFallbackHandler` copy plus the two
+  gates and their errors; `LOCKDOWN` stays typed `StateMachine` and no
+  flavour detection is needed. Cost: one extra warm SLOAD in the singleton
+  per validation. Safe v1.5.0's handler has no legacy
+  `isValidSignature(bytes,bytes)` overload, so there is no second entry point
+  to gate. Token callbacks, `simulate`, `getModules` and the hash helpers are
+  untouched.
+- Consequence: the handler is no longer a neutral drop-in. A Safe that sets it
+  without opting in (including one with no Lockdown config) has no ERC-1271.
+  The handler runtime codehash changes, so `fallbackHandlerCodehash` in
+  `deploy/manifest.json` must be read from chain after the redeploy
+  (`cast keccak "$(cast code <handler>)"`, per the manifest header; the
+  template value is still a `0xFILL` placeholder).
+
+UX cost (operator-visible): with the default, the Safe has no off-chain message
+signing at all: no ERC-1271 permits, EIP-3009 authorisations, Permit2
+signatures, off-chain DEX orders, SIWE logins, nested-Safe owner signatures
+through this Safe, and it cannot serve as a 20-byte ERC-1271 lockdown signer
+identity for another Safe. On-chain flows remain: `approve` / `transfer`
+through the owner path, CoW Protocol `setPreSignature`, Seaport `validate()`
+(cached by Seaport outside the handler), and module flows. A pre-install
+`signedMessages` entry is dormant, not erased: it validates again if the Safe
+opts in.
+
+Timelock activation and the flag (tooling, not contract policy): the free
+`setTimelockDelay(0 → N)` does not touch the flag, and once the delay is
+active any flag change, either way, waits that delay. A Safe that opted in at
+delay 0 therefore keeps ERC-1271 on after activating the timelock unless the
+same transaction turns it off. The contract enforces no coupling; the
+operator sets the choice in the activation batch
+`[setErc1271Allowed(choice), setTimelockDelay(N)]`, which the guard checks
+once at delay 0, so it lands atomically, ticket-free, in either order
+(`test_confirmed_timelockActivationBatchCarriesTheErc1271Choice`). The
+lifecycle helper builds this batch with "off" as the default when activating;
+`verify-install-v1.sh` WARNs on flag on under `timelockDelay > 0`.
+
+Considered and rejected (reviewer decision):
+- Clearing the flag on every trigger (`_lock`). The flag survives an incident
+  so that an opted-in Safe auto-resumes with its signing surface intact. A
+  reset would not kill a coerced signature anyway: the quorum re-enables the
+  flag and the signature validates again. The kill is the owner rotation:
+  recovery must `swapOwner` every coerced owner during Recovering
+  (`checkSignatures` counts only current owners), or invalidate the
+  authorisation at the token / Permit2 level (AR-15, AR-19).
+- Deriving the rule from the delay (`delay == 0 || flag`, or a handler
+  `try/catch` treating an unimplemented view as enabled). Rejected: a
+  fail-open path in the handler and a rule the operator cannot see in one
+  bit. The flag alone decides, in both flavours.
+
+Follow-up (V1.1, NOT implemented): a per-Safe message registry with expiry and
+an epoch for timelocked Safes that need specific off-chain signatures (§15).
+
+Tests: `test/poc/Erc1271OptIn.t.sol` (real Safe v1.5.0): default disabled
+after install on both branches, at delay 0 and N, including a pre-install
+`signedMessages` entry; uninitialised Safe disabled and setter rejected;
+install MultiSend `initialize` + `setErc1271Allowed(true)`; owner-path opt-in
+with event, other config fields intact, coerced EIP-3009 authorisation then
+settles (accepted residual); incident gate wins in LockedDown and Recovering
+whatever the flag and the flag survives the incident; setter rejected during
+the incident; disable again; under a timelock, enabling and disabling wait the
+delay (`TicketNotFound`, `TimelockNotElapsed`, then success); module path
+denied directly and inside MultiSend; cross-Safe isolation; base `Lockdown`
+flavour same rule; token callbacks unaffected. Existing ERC-1271 proofs
+(`Erc1271IncidentSignature`, integration, lifecycle, daybreak liveness) now
+opt in explicitly. `test/poc/Erc1271BypassRoutes.t.sol` maps every route by
+which an off-chain authorisation could validate with the flag off or during an
+incident, or by which the flag could flip without waiting, and pins the
+activation batch in both orders.
+
+### H.28 Module-to-owner escalation: documented residual, no new module-path rule (external audit NM-1060 6.2)
+
+Finding (Medium): the module path denies only the three guard-disable selectors (H.20). An enabled module can call `addOwnerWithThreshold(attacker, 1)`; the attacker then signs `execTransaction` on the owner path, which may administer the singleton and the guard slots. While the Safe is Uninitialised the owner path accepts everything, so the module can also `initialize(...)` the Safe with its own lockdown signers and recovery owners.
+
+Decision: no Solidity change. Two rules keep the guard simple:
+
+- **Fail-open by default before initialize.** The pre-init module path keeps exactly the denials that cost no extra logic: singleton calls (H.12) and the guard-disable self-calls (H.20). The guard does not grow edge-case rules for the pre-init window. That window is closed operationally: the canonical install is one owner-path MultiSend (`setGuard`, `setModuleGuard`, `setFallbackHandler`, `initialize`), so it lasts zero blocks; a staged install or a non-atomic singleton migration must not run with a module enabled.
+- **Owner topology stays allowed on the module path in Normal.** Legitimate modules change owners: social recovery (Candide), recovery hubs that `swapOwner`, signer-gate modules (Hats Signer Gate), inheritance modules. With `timelockDelay > 0` the escalation already costs a quorum-scheduled module ticket plus a fresh full owner-path delay, because `scheduleTransaction` checks signatures against the current owner set; the defenders can trigger a lockdown during that delay. At delay 0 a malicious module can already drain directly, so the escalation adds persistence, not theft power.
+
+Changes: H.20 rationale, §7.1, §7.2, INV-LIFE-5 and §14 rewritten. The module-path denials are direct-call guarantees, not authority guarantees. Accepted risk AR-29 records the residual in both states. V1.1 candidates, not taken: a cooldown on sensitive admin after a module-driven owner change, or an opt-in strict-modules flag per Safe.
+
+Tests: `test/poc/ModuleTopologyEscalation.t.sol` (real Safe v1.5.0) pins the behaviour: the finding's exact pre-init sequence (`test_limitation_*`), the existing pre-init denial of direct module calls to the singleton, the canonical atomic install, the Normal residual at delay 0, the fresh delay at delay > 0 (scheduling with a non-owner signature fails, then `TicketNotFound`, then `TimelockNotElapsed`), and a Candide-style recovery module rotating an owner.
+
+### H.29 Single trigger-digest source (NM-1060 6.4 / 6.7 integration)
+
+**Problem.** H.23 (NM-1060 6.7) added `keccak256(signer)` to the trigger
+message; H.25 (NM-1060 6.4) moved the drill off-chain into
+`script/DrillSigner.s.sol`, which re-encoded the digest itself. Developed in
+parallel, the two composed into a drill that still built the pre-H.23
+two-field digest, so it reported valid trigger signatures as invalid while
+`triggerLockdown` accepted them (7 failing tests on the merged tree). The off-chain drill is the only
+check that separates an armed Safe from an inert one (§6.4), so a drill that
+drifts from the trigger silently loses that property; its negative pins
+(`ArmedButInert`, `rejectsWrongSignerAndWrongDigest`) would still pass, for
+the wrong reason.
+
+**Fix.** The digest has one source. `hashLockdownTrigger(safe, signer,
+reasonHash)` is a public view over the internal `_hashLockdownTrigger`, which
+`triggerLockdown` itself calls (§5.2, §6.4). `DrillSigner.digest` reads the
+view instead of re-encoding, so a future change to the message updates the
+trigger, the view and the drill together. The view takes no signature and
+verifies nothing, so it does not reintroduce the H.25 exposure: the drill
+signature still never leaves the operator's machine. No change to the
+message, the verification path or verify-then-burn.
+
+**Pinned by** `test/Lockdown.t.sol`:
+`testFuzz_hashLockdownTrigger_matchesEip712Encoding`,
+`test_hashLockdownTrigger_isTheDigestTriggerVerifies` (a signature over the
+view's digest triggers and burns),
+`test_hashLockdownTrigger_preBindingTwoFieldDigestIsRejected` (a signature over
+the pre-H.23 message reverts `BadSignature`) and
+`testFuzz_drillScript_digestIsHashLockdownTrigger`. The drill's negative tests
+now carry positive controls (`test_drillScript_rejectsWrongSignerAndWrongDigest`,
+`ArmedButInert.test_refuted_signatureForAnotherSafeIsRejectedAndDetectable`),
+so a drifted drill digest fails them instead of passing vacuously.
 
 ---
 

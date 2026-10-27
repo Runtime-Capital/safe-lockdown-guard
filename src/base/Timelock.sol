@@ -3,17 +3,12 @@ pragma solidity 0.8.35;
 
 // Safe
 import {ISafe, Enum} from "@safe-global/safe-smart-account/interfaces/ISafe.sol";
-// OpenZeppelin
-import {SlotDerivation} from "@openzeppelin/contracts/utils/SlotDerivation.sol";
-import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 // Lockdown
 import {LockdownLib} from "../utils/LockdownLib.sol";
 
 /// @custom:security-contact contact@runtime.capital
 contract Timelock {
     using LockdownLib for bytes32;
-    using SlotDerivation for *;
-    using TransientSlot for *;
 
     /// @notice Smallest non-zero `timelockDelay`. Below this, the timelock
     ///         is meaningless (1h = the practical minimum to give an
@@ -32,14 +27,6 @@ contract Timelock {
     ///         immediate cleanup (independent of TTL).
     uint64 public constant TICKET_TTL = 90 days;
 
-    /// @notice ERC-7201 base slot for the per-Safe in-flight module-timelock
-    ///         reentrancy guard. `_inFlightModuleTicket(safe)` derives a
-    ///         transient mapping slot from this base, so each Safe gets an
-    ///         isolated one-shot lock (INV-TIME-11) that lives only for the
-    ///         duration of the module-path call frame.
-    bytes32 internal immutable IN_FLIGHT_TICKET_BASE_SLOT =
-        SlotDerivation.erc7201Slot("RuntimeGuard.transient.InFlightModuleTicket");
-
     struct SafeTimelockConfig {
         /// @dev 0 means timelock disabled (default after initialize).
         ///      When > 0, every owner-path AND module-path tx that is not
@@ -50,9 +37,9 @@ contract Timelock {
         /// @dev ticketKey => executableAt. ticketKey is namespace-prefixed
         ///      (see OWNER_TX_TIMELOCK_TYPEHASH / MODULE_TX_TIMELOCK_TYPEHASH)
         ///      so owner-path and module-path tickets share storage but
-        ///      cannot collide. Single-use: deleted on successful
-        ///      consumption inside the guard hook (pre-hook for module-path
-        ///      per Q6 decision).
+        ///      cannot collide. Single-use: deleted on consumption inside the
+        ///      guard hooks (owner-path: post-hook, on success; module-path:
+        ///      pre-hook, re-created by the post-hook on failure).
         mapping(bytes32 ticketKey => uint64 executableAt) ticketExecutableAt;
         /// @dev Allowlist of HSM-style addresses that can call
         ///      `bypassTimelock(safe, safeTxHash)` to set executableAt = now
@@ -108,6 +95,11 @@ contract Timelock {
     event TicketSwept(address indexed safe, bytes32 indexed ticketKey, address indexed sweeper);
     event TimelockBypassed(address indexed safe, bytes32 indexed safeTxHash, address indexed bypasser);
     event TimelockConsumed(address indexed safe, bytes32 indexed ticketKey);
+    /// @notice Emitted when the module post-hook re-creates a ticket that its
+    ///         pre-hook consumed, because the module call failed. The ticket
+    ///         is re-created with `executableAt = block.timestamp` (see
+    ///         `_restoreTicket`).
+    event TicketRestored(address indexed safe, bytes32 indexed ticketKey, uint64 executableAt);
 
     // -------------------------------------------------------------------
     // Errors
@@ -365,18 +357,15 @@ contract Timelock {
     //--------------------------------------------------------------------
 
     /// @dev Read-only ticket validity check (V1 review round 3, INV-TIME-4
-    ///      hardening). Replaces the pre-hook `_consumeTicket` to defer the
-    ///      actual deletion to the post-hook (`checkAfterExecution` /
-    ///      `checkAfterModuleExecution`) so that a failed inner execution
-    ///      under Safe v1.5.0 semantics does NOT silently burn a
-    ///      scheduled ticket.
+    ///      hardening). A failed inner execution under Safe v1.5.0
+    ///      semantics must NOT silently burn a scheduled ticket.
     ///
     ///      Safe v1.5.0 module path: `execTransactionFromModule` catches
     ///      inner reverts (emits `ExecutionFromModuleFailure`) and the outer
-    ///      tx commits. With the previous pre-hook delete, a single failed
-    ///      module tx burned the ticket and forced a full re-schedule
-    ///      + re-wait. Post-hook delete gated on `success == true` preserves
-    ///      the ticket for retry.
+    ///      tx commits. The module pre-hook verifies then consumes the
+    ///      ticket (so a nested re-execution of the same module tx finds no
+    ///      ticket), and `checkAfterModuleExecution` re-creates it on
+    ///      failure (see `_restoreTicket`) so the operator can retry.
     ///
     ///      Safe v1.5.0 owner path: when `safeTxGas == 0 && gasPrice == 0`,
     ///      an inner revert rolls back the entire tx including any pre-hook
@@ -410,6 +399,18 @@ contract Timelock {
         }
     }
 
+    /// @dev Re-create a module ticket consumed by the pre-hook of a module call
+    ///      that failed. Only called while `timelockDelay > 0`, where the
+    ///      pre-hook verified the ticket was executable: `executableAt = now`
+    ///      therefore never makes it executable earlier. It does restart the
+    ///      `TICKET_TTL` window, so every failed attempt extends the ticket's
+    ///      lifetime (room for retries; the quorum can still cancel it).
+    function _restoreTicket(address safe, bytes32 ticketKey) internal {
+        uint64 executableAt = uint64(block.timestamp);
+        _timelockConfigs[safe].ticketExecutableAt[ticketKey] = executableAt;
+        emit TicketRestored(safe, ticketKey, executableAt);
+    }
+
     function _cancelTicket(address safe, bytes32 ticketKey) private {
         SafeTimelockConfig storage cfg = _timelockConfigs[safe];
         require(cfg.ticketExecutableAt[ticketKey] != 0, TicketNotFound());
@@ -424,9 +425,5 @@ contract Timelock {
         require(block.timestamp > uint256(executableAt) + TICKET_TTL, TicketNotExpired());
         delete cfg.ticketExecutableAt[ticketKey];
         emit TicketSwept(safe, ticketKey, msg.sender);
-    }
-
-    function _inFlightModuleTicket(address safe) internal view returns (TransientSlot.Bytes32Slot) {
-        return IN_FLIGHT_TICKET_BASE_SLOT.deriveMapping(safe).asBytes32();
     }
 }

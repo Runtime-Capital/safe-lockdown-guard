@@ -116,11 +116,16 @@ contract ModuleTicketPreimagePoC is TestEnvironment {
 
         // The CALL form matches its own ticket...
         _preHook(module, address(multiSendCallOnly), 0, hex"", Enum.Operation.Call);
-        // ...then clear the INV-TIME-11 transient in-flight slot the way Safe would.
-        // `success = false` clears the slot WITHOUT consuming the ticket, so the revert
-        // below cannot be blamed on the ticket having been spent.
+        // ...then close it the way Safe would on a failed call: `success = false`
+        // re-creates the ticket the pre-hook consumed, so the revert below cannot be
+        // blamed on the ticket having been spent.
         vm.prank(address(safe));
-        guard.checkAfterModuleExecution(bytes32(0), false);
+        guard.checkAfterModuleExecution(
+            guard.getModuleTransactionHash(
+                address(safe), module, address(multiSendCallOnly), 0, hex"", Enum.Operation.Call
+            ),
+            false
+        );
 
         // ...the DELEGATECALL form of the same (to, value, data) does not. An empty
         // MultiSend payload is a valid, policy-accepted DELEGATECALL, so the revert

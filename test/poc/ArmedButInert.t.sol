@@ -8,8 +8,8 @@
 // Each test builds a Safe that reports itself as armed and then proves, by execution,
 // that `triggerLockdown` does not work - or, worse, that it works for ANYONE. For every
 // case the final assertion answers the operator's real question: can this be DISCOVERED
-// BEFORE the incident, using the read-only drill primitive
-// `Lockdown.testSigner(signer, hash, signature)` (src/Lockdown.sol:255)?
+// BEFORE the incident, using the off-chain drill `script/DrillSigner.s.sol`? (Lockdown
+// has no on-chain drill view: it would leak usable trigger signatures to an RPC.)
 //
 // A guard that silently does not work is worse than no guard, because it replaces
 // caution with false confidence.
@@ -18,11 +18,11 @@ pragma solidity ^0.8.24;
 import {TestEnvironment} from "../TestEnvironment.sol";
 
 import {Safe, Enum} from "@safe-global/safe-smart-account/Safe.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 import {Lockdown} from "../../src/Lockdown.sol";
 import {StateMachine} from "../../src/base/StateMachine.sol";
 import {MockSecretVerifier} from "../mocks/MockSecretVerifier.sol";
+import {DrillSigner} from "../../script/DrillSigner.s.sol";
 
 /// @dev Stands in for an EIP-7702 delegation target that does not implement ERC-1271.
 ///      Any non-empty code at the EOA address is enough to flip OpenZeppelin's
@@ -43,32 +43,17 @@ contract AlwaysMagic1271 {
 
 contract ArmedButInertPoC is TestEnvironment {
     Safe private safe;
+    DrillSigner private drill;
 
     function setUp() public override {
         super.setUp();
         safe = _createConfigureAndInitialise(97);
+        drill = new DrillSigner();
     }
 
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
-
-    /// @dev The exact EIP-712 digest `triggerLockdown` will check. An operator running a
-    ///      drill must use this digest for `testSigner` to be meaningful.
-    function _triggerDigest(address safe_, bytes32 reasonHash) private view returns (bytes32) {
-        (
-            bytes1 fields,
-            string memory name,
-            string memory version,
-            uint256 chainId,
-            address verifyingContract,
-            bytes32 salt,
-        ) = guard.eip712Domain();
-        return MessageHashUtils.toTypedDataHash(
-            MessageHashUtils.toDomainSeparator(fields, name, version, chainId, verifyingContract, salt),
-            keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe_, reasonHash))
-        );
-    }
 
     function _addSigner(bytes memory signer) private {
         _execAsOwner(safe, address(guard), 0, abi.encodeCall(Lockdown.addLockdownSigner, (signer)), Enum.Operation.Call);
@@ -102,7 +87,7 @@ contract ArmedButInertPoC is TestEnvironment {
         bytes memory sig = _signTrigger(safe, PANIC_PK, reason);
 
         // Pre-condition: the drill passes today.
-        assertTrue(guard.testSigner(abi.encodePacked(panicKey), _triggerDigest(address(safe), reason), sig), "armed");
+        assertTrue(drill.isValid(guard, address(safe), reason, abi.encodePacked(panicKey), sig), "armed");
 
         // The EOA gains code (EIP-7702 delegation), with no Safe or Lockdown tx at all.
         vm.etch(panicKey, address(new NotAn1271Wallet()).code);
@@ -115,8 +100,8 @@ contract ArmedButInertPoC is TestEnvironment {
 
         // DETECTABLE: the same drill primitive now returns false.
         assertFalse(
-            guard.testSigner(abi.encodePacked(panicKey), _triggerDigest(address(safe), reason), sig),
-            "testSigner detects the inert signer pre-incident"
+            drill.isValid(guard, address(safe), reason, abi.encodePacked(panicKey), sig),
+            "the drill detects the inert signer pre-incident"
         );
     }
 
@@ -155,8 +140,8 @@ contract ArmedButInertPoC is TestEnvironment {
 
         _assertStillNormal();
         assertFalse(
-            guard.testSigner(abi.encodePacked(wallet), _triggerDigest(address(safe), reason), hex"00"),
-            "testSigner detects it pre-incident"
+            drill.isValid(guard, address(safe), reason, abi.encodePacked(wallet), hex"00"),
+            "the drill detects it pre-incident"
         );
     }
 
@@ -189,8 +174,8 @@ contract ArmedButInertPoC is TestEnvironment {
 
         _assertStillNormal();
         assertFalse(
-            guard.testSigner(signer, _triggerDigest(address(safe), reason), hex"1234"),
-            "testSigner detects the unusable key shape pre-incident"
+            drill.isValid(guard, address(safe), reason, signer, hex"1234"),
+            "the drill detects the unusable key shape pre-incident"
         );
     }
 
@@ -209,7 +194,7 @@ contract ArmedButInertPoC is TestEnvironment {
         _addSigner(signer);
 
         bytes32 reason = bytes32("wrench");
-        assertTrue(guard.testSigner(signer, _triggerDigest(address(safe), reason), secret), "armed at registration");
+        assertTrue(drill.isValid(guard, address(safe), reason, signer, secret), "armed at registration");
 
         vm.etch(address(verifier), hex"");
 
@@ -219,8 +204,8 @@ contract ArmedButInertPoC is TestEnvironment {
         _assertStillNormal();
         _assertLooksArmed(2);
         assertFalse(
-            guard.testSigner(signer, _triggerDigest(address(safe), reason), secret),
-            "testSigner detects the dead verifier pre-incident"
+            drill.isValid(guard, address(safe), reason, signer, secret),
+            "the drill detects the dead verifier pre-incident"
         );
     }
 
@@ -239,9 +224,14 @@ contract ArmedButInertPoC is TestEnvironment {
         vm.expectRevert(Lockdown.BadSignature.selector);
         guard.triggerLockdown(address(safe), reason, abi.encodePacked(panicKey), sigForOther);
 
-        assertFalse(
-            guard.testSigner(abi.encodePacked(panicKey), _triggerDigest(address(safe), reason), sigForOther),
-            "detectable"
+        assertFalse(drill.isValid(guard, address(safe), reason, abi.encodePacked(panicKey), sigForOther), "detectable");
+        // Control: the rejection is the `safe` field, not a drill digest that drifted
+        // from the trigger's (which would reject every signature).
+        assertTrue(
+            drill.isValid(
+                guard, address(safe), reason, abi.encodePacked(panicKey), _signTrigger(safe, PANIC_PK, reason)
+            ),
+            "own-Safe signature passes the drill"
         );
     }
 
@@ -268,7 +258,7 @@ contract ArmedButInertPoC is TestEnvironment {
 
     /// @dev The headline. Every observable an operator or the verify script checks is
     ///      green - three slots wired, initialised, Normal, signer count 1 - and the
-    ///      Safe has NO working trigger. Only `testSigner`, run with real key material
+    ///      Safe has NO working trigger. Only a drill, run with real key material
     ///      against the real digest, separates this from a healthy Safe.
     function test_limitation_fullyGreenSafeCanHaveNoWorkingTrigger() public {
         Safe inert = _createAndConfigure(99);
@@ -300,8 +290,8 @@ contract ArmedButInertPoC is TestEnvironment {
         guard.triggerLockdown(address(inert), reason, abi.encodePacked(ghost), hex"00");
 
         assertFalse(
-            guard.testSigner(abi.encodePacked(ghost), _triggerDigest(address(inert), reason), hex"00"),
-            "only testSigner distinguishes armed from inert"
+            drill.isValid(guard, address(inert), reason, abi.encodePacked(ghost), hex"00"),
+            "only the drill distinguishes armed from inert"
         );
     }
 }

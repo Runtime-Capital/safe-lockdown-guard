@@ -15,6 +15,7 @@ import {LockdownSigners} from "../src/base/LockdownSigners.sol";
 import {RecoveryOwners} from "../src/base/RecoveryOwners.sol";
 import {StateMachine} from "../src/base/StateMachine.sol";
 import {PasswordVerifier} from "../src/verifiers/PasswordVerifier.sol";
+import {DrillSigner} from "../script/DrillSigner.s.sol";
 
 import {Mock1271Wallet} from "./mocks/Mock1271Wallet.sol";
 import {MockSecretVerifier} from "./mocks/MockSecretVerifier.sol";
@@ -122,8 +123,44 @@ contract LockdownTest is TestEnvironment {
     }
 
     function test_lockdownTypehashIsExposed() public view {
-        bytes32 expected = keccak256("Lockdown(address safe,bytes32 reasonHash)");
+        bytes32 expected = keccak256("Lockdown(address safe,bytes signer,bytes32 reasonHash)");
         assertEq(guard.LOCKDOWN_TYPEHASH(), expected, "typehash");
+    }
+
+    // `hashLockdownTrigger` is the single source of the trigger digest (SPEC_V1
+    // §H.29): `triggerLockdown` verifies through the same internal helper, and
+    // off-chain signers and `script/DrillSigner.s.sol` read the digest from it.
+
+    function testFuzz_hashLockdownTrigger_matchesEip712Encoding(address safe, bytes memory signer, bytes32 reasonHash)
+        public
+        view
+    {
+        assertEq(guard.hashLockdownTrigger(safe, signer, reasonHash), _msgHash(safe, signer, reasonHash));
+    }
+
+    function test_hashLockdownTrigger_isTheDigestTriggerVerifies() public {
+        bytes32 reasonHash = bytes32("view-digest");
+        bytes memory signer = _eoaSigner(panicKey);
+        bytes memory sig = _ecdsaSign(PANIC_PK, guard.hashLockdownTrigger(address(SAFE_A), signer, reasonHash));
+
+        guard.triggerLockdown(address(SAFE_A), reasonHash, signer, sig);
+        assertTrue(_isLockedDown(address(SAFE_A)), "signature over the view's digest triggers");
+        assertTrue(guard.isSignerBurntPermanently(address(SAFE_A), signer), "and burns the identity");
+    }
+
+    function test_hashLockdownTrigger_preBindingTwoFieldDigestIsRejected() public {
+        bytes32 reasonHash = bytes32("view-digest");
+        bytes memory signer = _eoaSigner(panicKey);
+        // The pre-NM-1060 6.7 message, `Lockdown(address safe,bytes32 reasonHash)`,
+        // which an un-updated signing tool or drill would still produce.
+        bytes32 legacy = _typedDataHash(
+            keccak256(abi.encode(keccak256("Lockdown(address safe,bytes32 reasonHash)"), address(SAFE_A), reasonHash))
+        );
+        assertTrue(legacy != guard.hashLockdownTrigger(address(SAFE_A), signer, reasonHash), "digests differ");
+
+        vm.expectRevert(Lockdown.BadSignature.selector);
+        guard.triggerLockdown(address(SAFE_A), reasonHash, signer, _ecdsaSign(PANIC_PK, legacy));
+        assertFalse(_isLockedDown(address(SAFE_A)));
     }
 
     // -------------------------------------------------------------------
@@ -441,7 +478,7 @@ contract LockdownTest is TestEnvironment {
         // any successful trigger.
         bytes memory key = abi.encodePacked(panicKey);
         bytes32 reasonHash = bytes32("drill");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_A), key, reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
 
         guard.triggerLockdown(address(SAFE_A), reasonHash, key, sig);
@@ -601,7 +638,7 @@ contract LockdownTest is TestEnvironment {
         guard.removeLockdownSigner(key);
 
         bytes32 reasonHash = bytes32("removed-then-tried");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash); // id was 1
+        bytes32 msgHash = _msgHash(address(SAFE_A), key, reasonHash); // id was 1
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
 
         vm.expectRevert(LockdownSigners.LockdownSigners_Unknown.selector);
@@ -685,7 +722,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_triggerLockdownRevertsOnUninitialisedSafe() public {
         address uninitSafe = address(0xDEAD0001);
-        bytes32 msgHash = _msgHash(uninitSafe, bytes32("nocode"));
+        bytes32 msgHash = _msgHash(uninitSafe, _eoaSigner(panicKey), bytes32("nocode"));
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -698,7 +735,7 @@ contract LockdownTest is TestEnvironment {
     }
 
     function test_triggerLockdownRevertsOnInvalidState() public {
-        bytes32 msgHash = _msgHash(address(SAFE_UNINIT), bytes32("uninit"));
+        bytes32 msgHash = _msgHash(address(SAFE_UNINIT), _eoaSigner(panicKey), bytes32("uninit"));
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -716,7 +753,9 @@ contract LockdownTest is TestEnvironment {
         uint256 t0 = block.timestamp;
         uint256 t1 = t0 + 10;
         uint256 t0_end = t0 + guard.getLockdownDuration(address(SAFE_A));
-        uint256 t1_end = t1 + guard.getLockdownDuration(address(SAFE_A));
+        // A re-trigger while LockedDown stacks on the current window rather than
+        // restarting from `now`: the new end is `t0_end + lockdownDuration`.
+        uint256 t1_end = t0_end + guard.getLockdownDuration(address(SAFE_A));
 
         // First lockdown
         _triggerLockdown(SAFE_A, panic);
@@ -735,15 +774,34 @@ contract LockdownTest is TestEnvironment {
 
         // Extended (never shortened), still LockedDown, reason updated.
         assertEq(guard.getLockdownUntil(address(SAFE_A)), t1_end);
-        assertGt(t1_end, t0_end, "re-trigger extends, never shortens");
+        assertGt(t1_end, t1 + guard.getLockdownDuration(address(SAFE_A)), "re-trigger stacks, never restarts from now");
         assertEq(guard.lastReasonHash(address(SAFE_A)), again);
         (StateMachine.State stateAfter,) = guard.getState(address(SAFE_A));
         assertEq(uint256(stateAfter), uint256(StateMachine.State.LockedDown), "stayed LockedDown");
     }
 
+    // Re-triggers stack on the current window, so two triggers in the same block
+    // freeze for `2 × lockdownDuration`. Every trigger burns one signer, so the
+    // total stays bounded by `(registered signers) × lockdownDuration` (INV-LIFE-2).
+    function test_triggerLockdownStacksInSameBlock() public {
+        uint256 duration = guard.getLockdownDuration(address(SAFE_A));
+        uint256 t0 = block.timestamp;
+
+        _triggerLockdown(SAFE_A, bytes32("panic"));
+        bytes memory sig = _signWithPassword(SHARED_SECRET_A);
+        guard.triggerLockdown(address(SAFE_A), bytes32("again"), _secretSignerA(), sig);
+
+        assertEq(guard.getLockdownUntil(address(SAFE_A)), t0 + 2 * duration, "stacked to 2x duration");
+        (StateMachine.State s,) = guard.getState(address(SAFE_A));
+        assertEq(uint256(s), uint256(StateMachine.State.LockedDown));
+    }
+
     // PR #59: triggerLockdown is onlyInitialized, so a still-registered signer can
     // re-lock from within the Recovering window (a missed-window safety net). The
-    // Safe transitions back into LockedDown with the window reset from `now`.
+    // Safe transitions back into LockedDown with the window reset from `now`
+    // (`lockdownUntil <= now` in Recovering, so nothing stacks). A re-trigger
+    // during Recovering returns the Safe to LockedDown and closes the repair
+    // window: the recovery whitelist is owner-path, hence blocked again.
     function test_triggerLockdownReLocksDuringRecovering() public {
         uint256 duration = guard.getLockdownDuration(address(SAFE_A));
 
@@ -761,6 +819,47 @@ contract LockdownTest is TestEnvironment {
         assertEq(uint256(s2), uint256(StateMachine.State.LockedDown), "re-locked from Recovering");
         assertEq(guard.getLockdownUntil(address(SAFE_A)), tNow + duration, "window reset from now");
         assertEq(guard.lastReasonHash(address(SAFE_A)), bytes32("again"));
+    }
+
+    // NM-1060 6.8 / H.24: the worst-case freeze for k triggers is
+    // k × (D + R) − (k − 1) seconds, reached by re-triggering at the LAST second
+    // of each Recovering window (each re-trigger restarts a full D + R cycle, so
+    // R is paid k times; stacking inside LockedDown only reaches k × D + R).
+    // Pinned to the second for k = 2, with the second trigger closing the repair
+    // window. `vm.getBlockTimestamp()` because `block.timestamp` may be cached
+    // across `vm.warp` under via-IR.
+    function test_triggerLockdownWorstCaseBoundForTwoTriggers() public {
+        uint256 duration = guard.getLockdownDuration(address(SAFE_A));
+        uint256 resumeDelay = guard.getResumeDelay(address(SAFE_A));
+        uint256 t0 = vm.getBlockTimestamp();
+
+        _triggerLockdown(SAFE_A, bytes32("panic"));
+        assertEq(guard.getLockdownUntil(address(SAFE_A)), t0 + duration, "first window");
+
+        // Last second of Recovering: Normal would start one second later.
+        vm.warp(t0 + duration + resumeDelay - 1);
+        (StateMachine.State s,) = guard.getState(address(SAFE_A));
+        assertEq(uint256(s), uint256(StateMachine.State.Recovering), "last second of Recovering");
+
+        bytes memory sig = _signWithPassword(SHARED_SECRET_A);
+        guard.triggerLockdown(address(SAFE_A), bytes32("again"), _secretSignerA(), sig);
+
+        (s,) = guard.getState(address(SAFE_A));
+        assertEq(uint256(s), uint256(StateMachine.State.LockedDown), "repair window closed");
+        assertEq(
+            guard.getLockdownUntil(address(SAFE_A)),
+            t0 + 2 * duration + resumeDelay - 1,
+            "second window starts from now, not from the first window's end"
+        );
+
+        // k = 2: the Safe is Normal again exactly at t0 + 2 × (D + R) − 1.
+        uint256 bound = t0 + 2 * (duration + resumeDelay) - 1;
+        vm.warp(bound - 1);
+        (s,) = guard.getState(address(SAFE_A));
+        assertEq(uint256(s), uint256(StateMachine.State.Recovering), "still Recovering one second before the bound");
+        vm.warp(bound);
+        (s,) = guard.getState(address(SAFE_A));
+        assertEq(uint256(s), uint256(StateMachine.State.Normal), "auto-resumed exactly at k(D+R) - (k-1)");
     }
 
     // PR #59: once the freeze AND the recovery delay have fully elapsed the Safe
@@ -823,7 +922,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_triggerLockdownRevertsOnNotRegistered() public {
         bytes memory ghostKey = abi.encodePacked(address(0xDEAD));
-        bytes32 msgHash = _msgHash(address(SAFE_A), bytes32("ghost"));
+        bytes32 msgHash = _msgHash(address(SAFE_A), ghostKey, bytes32("ghost"));
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         vm.expectRevert(LockdownSigners.LockdownSigners_Unknown.selector);
         guard.triggerLockdown(address(SAFE_A), bytes32("ghost"), ghostKey, sig);
@@ -831,7 +930,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_triggerLockdownRevertsOnBadSignature() public {
         bytes memory key = abi.encodePacked(panicKey);
-        bytes32 wrongMsgHash = _msgHash(address(SAFE_A), bytes32("WRONG"));
+        bytes32 wrongMsgHash = _msgHash(address(SAFE_A), key, bytes32("WRONG"));
         bytes memory sig = _ecdsaSign(PANIC_PK, wrongMsgHash);
         // Send a different reasonHash → msgHash recomputed differently → sig invalid.
         vm.expectRevert(Lockdown.BadSignature.selector);
@@ -876,7 +975,7 @@ contract LockdownTest is TestEnvironment {
         // unreplayable - the operator cannot put the same panic identity
         // back into the active set in the first place.
         bytes32 reasonHash = bytes32("first");
-        bytes32 msgHash1 = _msgHash(address(SAFE_A), reasonHash);
+        bytes32 msgHash1 = _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash);
         bytes memory sig1 = _ecdsaSign(PANIC_PK, msgHash1);
         bytes memory key = abi.encodePacked(panicKey);
 
@@ -912,7 +1011,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_ecdsaPath_endToEnd() public {
         bytes32 reasonHash = bytes32("ecdsa-end-to-end");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(panicKey), sig);
         assertTrue(_isLockedDown(address(SAFE_A)), "locked");
@@ -920,7 +1019,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_ecdsaPath_wrongPrivKeyFails() public {
         bytes32 reasonHash = bytes32("wrong-key");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(OTHER_PK, msgHash); // signed by B
         vm.expectRevert(Lockdown.BadSignature.selector);
         guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(panicKey), sig);
@@ -968,7 +1067,7 @@ contract LockdownTest is TestEnvironment {
         guard.addLockdownSigner(_eoaSigner(address(wallet)));
 
         bytes32 reasonHash = bytes32("erc1271-e2e");
-        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), reasonHash));
+        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(address(wallet)), reasonHash));
         guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(address(wallet)), sig);
         assertTrue(_isLockedDown(address(SAFE_A)), "locked via ERC-1271 signer");
     }
@@ -979,7 +1078,7 @@ contract LockdownTest is TestEnvironment {
         guard.addLockdownSigner(_eoaSigner(address(wallet)));
 
         bytes32 reasonHash = bytes32("erc1271-wrong");
-        bytes memory sig = _ecdsaSign(OTHER_PK, _msgHash(address(SAFE_A), reasonHash));
+        bytes memory sig = _ecdsaSign(OTHER_PK, _msgHash(address(SAFE_A), _eoaSigner(address(wallet)), reasonHash));
         vm.expectRevert(Lockdown.BadSignature.selector);
         guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(address(wallet)), sig);
     }
@@ -990,7 +1089,7 @@ contract LockdownTest is TestEnvironment {
         // are rejected by that overload). This matches the removed
         // ECDSAVerifier's strict-65 wire format: no permissiveness regression.
         bytes32 reasonHash = bytes32("compact-2098");
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(PANIC_PK, _msgHash(address(SAFE_A), reasonHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
         bytes32 vs = s | bytes32((uint256(v) - 27) << 255); // low-s ⟹ top bit free
         bytes memory compactSig = abi.encodePacked(r, vs); // 64 bytes
         vm.expectRevert(Lockdown.BadSignature.selector);
@@ -999,7 +1098,7 @@ contract LockdownTest is TestEnvironment {
 
     function test_crossSafe_signatureBoundToSafeViaBadSignature() public {
         bytes32 reasonHash = bytes32("cross-safe-binding");
-        bytes memory sigForA = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), reasonHash));
+        bytes memory sigForA = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
         // Membership(B, panicKey) is true, so this reverts at the signature
         // check (BadSignature), NOT at membership (NotLockdownSigner).
         vm.expectRevert(Lockdown.BadSignature.selector);
@@ -1036,7 +1135,7 @@ contract LockdownTest is TestEnvironment {
     function test_crossKey_signerOnAdoesNotAuthorizeB() public {
         // other is not a registered signer on SAFE_A
         bytes32 reasonHash = bytes32("cross-key");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash); // B's signer 1 is panicKey
+        bytes32 msgHash = _msgHash(address(SAFE_A), _eoaSigner(other), reasonHash); // B's signer 1 is panicKey
         bytes memory sig = _ecdsaSign(OTHER_PK, msgHash);
         vm.expectRevert(LockdownSigners.LockdownSigners_Unknown.selector);
         guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(other), sig);
@@ -1065,7 +1164,7 @@ contract LockdownTest is TestEnvironment {
         _triggerLockdown(SAFE_A, bytes32("panic"));
         // Trigger address(SAFE_B) with its own signer.
         bytes32 reasonHash = bytes32("b panic");
-        bytes32 msgHash = _msgHash(address(SAFE_B), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_B), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         guard.triggerLockdown(address(SAFE_B), reasonHash, _eoaSigner(panicKey), sig);
 
@@ -1106,12 +1205,15 @@ contract LockdownTest is TestEnvironment {
     // Fail-open uninit
     // -------------------------------------------------------------------
 
-    function test_uninitSafe_passesThrough() public view {
+    /// @dev ERC-1271 is opt-in (SPEC_V1 H.27): an uninitialised Safe reads
+    ///      `erc1271Allowed == false`, so the handler refuses, fail-closed.
+    function test_uninitSafe_erc1271DisabledByDefault() public view {
         bytes32 hash = keccak256("authorise something");
         bytes memory signature = _signMessage(SAFE_UNINIT, OWNER_PK, hash);
-        assertTrue(
+        assertFalse(guard.isErc1271Allowed(address(SAFE_UNINIT)), "default disabled");
+        assertFalse(
             SignatureChecker.isValidERC1271SignatureNow(address(SAFE_UNINIT), hash, signature),
-            "handler passes through when no guard installed"
+            "handler refuses until the Safe opts in"
         );
     }
 
@@ -1160,7 +1262,7 @@ contract LockdownTest is TestEnvironment {
     }
 
     function test_uninitSafe_triggerReverts() public {
-        bytes32 msgHash = _msgHash(address(SAFE_UNINIT), bytes32("nope"));
+        bytes32 msgHash = _msgHash(address(SAFE_UNINIT), _eoaSigner(panicKey), bytes32("nope"));
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -2343,7 +2445,7 @@ contract LockdownTest is TestEnvironment {
         // address(SAFE_B) has exactly ONE signer. Trigger burns it → SafeDormant.
         vm.recordLogs();
         bytes32 reasonHash = bytes32("panic-B");
-        bytes32 msgHash = _msgHash(address(SAFE_B), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_B), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         guard.triggerLockdown(address(SAFE_B), reasonHash, _eoaSigner(panicKey), sig);
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -2378,7 +2480,7 @@ contract LockdownTest is TestEnvironment {
         guard.addLockdownSigner(abi.encodePacked(address(0xDEAD2)));
         // Trigger via the original signer (id=1).
         bytes32 reasonHash = bytes32("panicB");
-        bytes32 msgHash = _msgHash(address(SAFE_B), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_B), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         guard.triggerLockdown(address(SAFE_B), reasonHash, _eoaSigner(panicKey), sig);
         // Burnt one was id=1; the transient id=2 remains. count == 1, no
@@ -2402,7 +2504,7 @@ contract LockdownTest is TestEnvironment {
     function test_safeLockedDown_eventCarriesSignerIdentity() public {
         vm.recordLogs();
         bytes32 reasonHash = bytes32("panicHash");
-        bytes32 msgHash = _msgHash(address(SAFE_A), reasonHash);
+        bytes32 msgHash = _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash);
         bytes memory sig = _ecdsaSign(PANIC_PK, msgHash);
         bytes memory signer = _eoaSigner(panicKey);
 
@@ -2437,7 +2539,7 @@ contract LockdownTest is TestEnvironment {
     function test_triggerLockdown_emitsSignerRemovedBoundToSafeNotCaller() public {
         vm.assume(address(this) != address(SAFE_A)); // avoid false positive if test contract is the Safe
         bytes32 reasonHash = bytes32("panic-removed");
-        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), reasonHash));
+        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
         bytes memory signer = _eoaSigner(panicKey);
 
         vm.recordLogs();
@@ -2462,55 +2564,80 @@ contract LockdownTest is TestEnvironment {
     }
 
     // -------------------------------------------------------------------
-    // V1 hardening (SPEC_V1 §H.17, Gap 9):
-    // testSigner view returns ok without state mutation.
+    // Off-chain drill (SPEC_V1 §6.4, §H.25): there is no on-chain view to test
+    // a signature, so a drill cannot leak a usable trigger signature to an RPC.
+    // `script/DrillSigner.s.sol` performs the same check in a local EVM. The
+    // removal itself is pinned in test/poc/DrillSignatureExposure.t.sol.
     // -------------------------------------------------------------------
 
-    function test_testSigner_acceptsValidEcdsa() public {
-        bytes32 hash = keccak256("drill-message");
-        bytes memory sig = _ecdsaSign(PANIC_PK, hash);
-        bool ok = guard.testSigner(_eoaSigner(panicKey), hash, sig);
-        assertTrue(ok, "valid ECDSA accepted");
-    }
-
-    function test_testSigner_rejectsWrongSigner() public {
-        bytes32 hash = keccak256("drill-message");
-        bytes memory sig = _ecdsaSign(PANIC_PK, hash);
-        bool ok = guard.testSigner(_eoaSigner(address(0xDEADBEEF)), hash, sig);
-        assertFalse(ok, "wrong signer rejected");
-    }
-
-    function test_testSigner_handlesRevertingVerifier() public {
+    function test_triggerLockdownRejectsRevertingVerifier() public {
         MockRevertingVerifier rv = new MockRevertingVerifier();
-        bool ok = guard.testSigner(_verifierSigner(address(rv), hex"01"), bytes32(0), hex"02");
-        assertFalse(ok, "revert normalised to false");
+        bytes memory signer = _verifierSigner(address(rv), hex"01");
+        vm.prank(address(SAFE_A));
+        guard.addLockdownSigner(signer);
+
+        vm.expectRevert(Lockdown.BadSignature.selector);
+        guard.triggerLockdown(address(SAFE_A), bytes32("reverting"), signer, hex"02");
     }
 
-    function test_testSigner_handlesEmptyReturn() public {
+    function test_triggerLockdownRejectsEmptyReturnVerifier() public {
         MockEmptyReturnVerifier ev = new MockEmptyReturnVerifier();
-        bool ok = guard.testSigner(_verifierSigner(address(ev), hex"01"), bytes32(0), hex"02");
-        assertFalse(ok, "empty return normalised to false");
+        bytes memory signer = _verifierSigner(address(ev), hex"01");
+        vm.prank(address(SAFE_A));
+        guard.addLockdownSigner(signer);
+
+        vm.expectRevert(Lockdown.BadSignature.selector);
+        guard.triggerLockdown(address(SAFE_A), bytes32("empty"), signer, hex"02");
     }
 
-    function test_testSigner_isStatelessDrillPrimitive() public {
-        // testSigner MUST work without singleton state, so the quorum can
-        // sanity-check a candidate verifier/key/signature tuple before or
-        // after registration.
-        MockSelectiveMagicVerifier candidate = new MockSelectiveMagicVerifier();
-        // MockSelectiveMagicVerifier returns magic when key.length > 0.
-        bool ok = guard.testSigner(_verifierSigner(address(candidate), hex"01"), bytes32(0), hex"");
-        assertTrue(ok, "candidate testable");
-    }
-
-    function test_testSigner_doesNotMutateState() public {
-        // Trigger has not happened; signersCount stays at 2 for address(SAFE_A).
+    function test_drillScript_acceptsValidEcdsaWithoutMutatingState() public {
+        DrillSigner drill = new DrillSigner();
+        bytes32 reasonHash = bytes32("drill");
+        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
         (,,, uint256 cntBefore,) = guard.getConfigSnapshot(address(SAFE_A));
-        bytes32 hash = keccak256("drill");
-        bytes memory sig = _ecdsaSign(PANIC_PK, hash);
-        guard.testSigner(_eoaSigner(panicKey), hash, sig);
+
+        DrillSigner.Report memory r = drill.check(guard, address(SAFE_A), reasonHash, _eoaSigner(panicKey), sig);
+        assertTrue(r.registered && r.valid && !r.burnt, "drill says ready");
+        assertEq(uint256(r.state), uint256(StateMachine.State.Normal));
+
         (,,, uint256 cntAfter,) = guard.getConfigSnapshot(address(SAFE_A));
         assertEq(cntBefore, cntAfter, "no state mutation");
-        assertFalse(_isLockedDown(address(SAFE_A)), "not locked down");
+
+        // The drilled signature is exactly what triggerLockdown accepts.
+        guard.triggerLockdown(address(SAFE_A), reasonHash, _eoaSigner(panicKey), sig);
+        assertTrue(_isLockedDown(address(SAFE_A)));
+    }
+
+    function test_drillScript_rejectsWrongSignerAndWrongDigest() public {
+        DrillSigner drill = new DrillSigner();
+        bytes32 reasonHash = bytes32("drill");
+        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
+        // Control: the negatives below are only meaningful if the drill accepts
+        // the right tuple (a drifted drill digest would make them pass vacuously).
+        assertTrue(drill.isValid(guard, address(SAFE_A), reasonHash, _eoaSigner(panicKey), sig), "control");
+
+        // Wrong signer: the digest is correct for the claimed identity, the key is not.
+        bytes memory wrong = _eoaSigner(address(0xDEADBEEF));
+        bytes memory sigForWrong = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), wrong, reasonHash));
+        assertFalse(drill.isValid(guard, address(SAFE_A), reasonHash, wrong, sigForWrong), "wrong signer");
+        // Wrong digest: right signer and key, signature over another reason / Safe.
+        assertFalse(drill.isValid(guard, address(SAFE_A), bytes32("other"), _eoaSigner(panicKey), sig), "wrong reason");
+        assertFalse(drill.isValid(guard, address(SAFE_B), reasonHash, _eoaSigner(panicKey), sig), "wrong safe");
+    }
+
+    function test_drillScript_digestMatchesTriggerDigest() public {
+        DrillSigner drill = new DrillSigner();
+        assertEq(
+            drill.digest(guard, address(SAFE_A), _eoaSigner(panicKey), bytes32("r")),
+            _msgHash(address(SAFE_A), _eoaSigner(panicKey), bytes32("r"))
+        );
+    }
+
+    function testFuzz_drillScript_digestIsHashLockdownTrigger(address safe, bytes memory signer, bytes32 reasonHash)
+        public
+    {
+        DrillSigner drill = new DrillSigner();
+        assertEq(drill.digest(guard, safe, signer, reasonHash), guard.hashLockdownTrigger(safe, signer, reasonHash));
     }
 
     // -------------------------------------------------------------------
@@ -2633,7 +2760,7 @@ contract LockdownTest is TestEnvironment {
         bytes memory signer = _eoaSigner(panicKey);
         assertTrue(guard.isLockdownSigner(address(SAFE_A), signer), "registered before");
 
-        bytes32 wrongMsgHash = _msgHash(address(SAFE_A), bytes32("WRONG"));
+        bytes32 wrongMsgHash = _msgHash(address(SAFE_A), signer, bytes32("WRONG"));
         bytes memory sig = _ecdsaSign(PANIC_PK, wrongMsgHash);
         vm.expectRevert(Lockdown.BadSignature.selector);
         guard.triggerLockdown(address(SAFE_A), bytes32("right"), signer, sig);
@@ -2728,7 +2855,7 @@ contract LockdownTest is TestEnvironment {
     ///      and ECDSA recovery yields a non-signer -> BadSignature.
     function test_triggerSignatureDoesNotReplayAcrossChains() public {
         bytes32 reasonHash = bytes32("xchain");
-        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), reasonHash));
+        bytes memory sig = _ecdsaSign(PANIC_PK, _msgHash(address(SAFE_A), _eoaSigner(panicKey), reasonHash));
 
         vm.chainId(424242);
         vm.expectRevert(Lockdown.BadSignature.selector);
@@ -2798,7 +2925,11 @@ contract LockdownTest is TestEnvironment {
         return state == StateMachine.State.Recovering;
     }
 
-    function _msgHash(address safe, bytes32 reasonHash) private view returns (bytes32) {
+    function _msgHash(address safe, bytes memory signer, bytes32 reasonHash) private view returns (bytes32) {
+        return _typedDataHash(keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, keccak256(signer), reasonHash)));
+    }
+
+    function _typedDataHash(bytes32 structHash) private view returns (bytes32) {
         (, string memory name, string memory version, uint256 chainId, address verifyingContract,,) =
             guard.eip712Domain();
         bytes32 domainSep = keccak256(
@@ -2810,9 +2941,7 @@ contract LockdownTest is TestEnvironment {
                 verifyingContract
             )
         );
-        return keccak256(
-            abi.encodePacked("\x19\x01", domainSep, keccak256(abi.encode(guard.LOCKDOWN_TYPEHASH(), safe, reasonHash)))
-        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSep, structHash));
     }
 
     function _eoaSigner(address signer) private pure returns (bytes memory) {

@@ -20,7 +20,7 @@ false` (the module-timelock hook tests share transient storage between the
 pre- and post-hook, as they do in production).
 
 ```bash
-forge test          # 483 passing
+forge test          # 601 passing
 forge build
 forge fmt --check
 make hooks          # optional: enables the tracked pre-commit fmt hook
@@ -69,7 +69,7 @@ WebCrypto and WebAuthn behaviour is what the helper depends on.
   `src/LockdownTimelock.sol`: they compile only with via-ir, and Foundry's
   `--ir-minimum` mode silently drops them from the report. Expect no line
   coverage number for the singleton; test strength is evidenced by the
-  483-test suite, the 15 Echidna invariants, and the Medusa campaign.
+  601-test suite, the 16 Echidna invariants, and the Medusa campaign.
 - `forge build --sizes` can omit the production artifacts in this via-ir
   setup. Use `scripts/contract-sizes.sh`, which reads the build artifacts
   directly.

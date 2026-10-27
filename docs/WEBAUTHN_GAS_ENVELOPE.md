@@ -22,7 +22,7 @@ forge script script/WebAuthnGasEnvelope.s.sol --sig 'measurePragueVerifierOnCurr
 ```
 
 The harness is a `forge script`, deliberately not a test: a test file would
-change the 483-test count that `AUDIT_BRIEF.md`, the scope sheet and the RFQ
+change the 556-test count that `AUDIT_BRIEF.md`, the scope sheet and the RFQ
 answers all state, forcing a documentation round-trip for a measurement tool.
 Nothing under `src/` is involved.
 
@@ -43,9 +43,9 @@ exact runtimes produced by the default Prague build before measuring them.
 | `verify()`, captured Chrome + YubiKey fixture (long clientDataJSON) | 358,459 |
 | `verify()`, captured Chrome + Google Password Manager fixture | 349,116 |
 | **`verify()` range** | **349,116 - 364,140** |
-| full `triggerLockdown`, UP-only verifier | 410,248 |
-| full `triggerLockdown`, UV-required verifier | 416,925 |
-| **full `triggerLockdown` range** | **410,248 - 416,925** |
+| full `triggerLockdown`, UP-only verifier | 420,247 |
+| full `triggerLockdown`, UV-required verifier | 419,224 |
+| **full `triggerLockdown` range** | **419,224 - 420,247** |
 
 ### Current Ethereum mainnet path (Osaka / EIP-7951)
 

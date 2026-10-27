@@ -77,7 +77,7 @@ contract Bomb1271Wallet {
 
 /// @notice SURFACE A (hostile / mutable verifier dispatch) and SURFACE C
 ///         (griefing and denial) proofs. Surface B ("armed but inert" /
-///         `testSigner` detectability) is deliberately NOT covered here.
+///         drill detectability) is deliberately NOT covered here.
 contract VerifierAndGriefingPoC is TestEnvironment {
     /// @dev Realistic mainnet ceiling. Every gas claim below is asserted under
     ///      this cap; the bombs are gas-adaptive, so raising the cap does not

@@ -17,7 +17,11 @@
 #      (resumeDelay in [RESUME_DELAY_MIN, RESUME_DELAY_MAX])
 #      (recoveryOwnerAllowlistCount > 0)
 #      (lockdownUntil == 0)
-#   8. signersCount > 0 (warn at 0: Safe is dormant)
+#   8. signersCount > 0 (FAIL at 0 - Safe is dormant - unless --allow-dormant)
+#   9. Safe masterCopy EXTCODEHASH pinned (fail-closed like the other pins)
+#  10. Owners, threshold and enabled modules equal the preflight snapshot
+#      (--snapshot); without a snapshot they are printed and WARNed as
+#      not compared
 #
 # Read-only. Exit 0 on success, 1 on any failed check.
 #
@@ -33,7 +37,9 @@ EXPECTED_SAFE_CODEHASH=""
 EXPECTED_FALLBACK_HANDLER=""
 EXPECTED_FALLBACK_HANDLER_CODEHASH=""
 ALLOW_UNPINNED=0
+ALLOW_DORMANT=0
 MANIFEST=""
+SNAPSHOT=""
 
 usage() {
     cat <<EOF
@@ -42,14 +48,28 @@ Usage: $0 --safe <addr> --singleton <addr> --rpc <url>
           [--safe-codehash <hash>]
           [--fallback-handler <addr>] [--fallback-handler-codehash <hash>]
           [--allow-unpinned-codehash] [--manifest deploy/manifest.json]
+          [--snapshot <preflight-snapshot.json>] [--allow-dormant]
 V1 read-only post-install verifier. Codehash binding is MANDATORY by default:
 omitting --singleton-codehash / --multi-send-codehash /
---fallback-handler-codehash FAILs (a same-address fake can spoof
-VERSION/supportsInterface; a fake handler can spoof install completeness).
+--fallback-handler-codehash / --safe-codehash FAILs (a same-address fake can
+spoof VERSION/supportsInterface; a fake handler can spoof install
+completeness; a non-canonical Safe masterCopy can ignore the guard hooks). A
+manifest placeholder (0xFILL...) counts as omitted.
 Pass --allow-unpinned-codehash to
 downgrade to warnings for dev/test only. Binds the singleton and its
 MULTI_SEND_CALL_ONLY to audited/canonical bytecode (multichain same-address
 trust, T-DEPLOY-1 / T-DEPLOY-2, SPEC_V1 §14.1).
+
+--snapshot <file>  JSON written by preflight-install-v1.sh --snapshot-out.
+                   FAILs if the Safe's owners, threshold or enabled modules
+                   differ from it (an install batch that also slipped in
+                   addOwnerWithThreshold / changeThreshold / enableModule).
+                   Without it, verify prints them and WARNs "not compared".
+--allow-dormant    Accept signersCount == 0 (a valid but DORMANT state, SPEC
+                   H.15: triggerLockdown is unreachable). Without it a dormant
+                   install FAILs. Use it only for the intermediate check of a
+                   staged install, then re-run without it once signers are
+                   registered.
 EOF
 }
 
@@ -65,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --fallback-handler-codehash) EXPECTED_FALLBACK_HANDLER_CODEHASH="$2"; shift 2 ;;
         --allow-unpinned-codehash) ALLOW_UNPINNED=1; shift ;;
         --manifest) MANIFEST="$2"; shift 2 ;;
+        --snapshot) SNAPSHOT="$2"; shift 2 ;;
+        --allow-dormant) ALLOW_DORMANT=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -76,6 +98,15 @@ fi
 
 if ! command -v cast >/dev/null 2>&1; then
     echo "cast not found." >&2; exit 1
+fi
+
+if [[ -n "$SNAPSHOT" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq required for --snapshot." >&2; exit 1
+    fi
+    if [[ ! -r "$SNAPSHOT" ]]; then
+        echo "snapshot file not readable: $SNAPSHOT" >&2; exit 1
+    fi
 fi
 
 # Resolve expected codehashes from the manifest (by chainId) when not given
@@ -224,15 +255,14 @@ else
 fi
 
 # Pin the Safe's masterCopy (slot 0) codehash: a non-canonical Safe impl can
-# ignore the guard hooks while reporting a canonical VERSION(). WARN when
-# unpinned (operator-owned wallet, weaker anchor than the shared singleton).
+# ignore the guard hooks while reporting a canonical VERSION(), and a downgrade
+# to a Safe without IModuleGuard leaves all three Lockdown slots looking
+# correct (AR-20). Fail-closed like the other pins: unpinned (no
+# --safe-codehash, manifest placeholder) FAILs unless --allow-unpinned-codehash.
 raw=$(cast storage "$SAFE" 0 --rpc-url "$RPC" 2>/dev/null || true)
 safe_master=$(slot_to_address "${raw:-0x0}")
-if [[ -n "$EXPECTED_SAFE_CODEHASH" ]]; then
-    check_codehash_eq "Safe masterCopy EXTCODEHASH" "$safe_master" "$EXPECTED_SAFE_CODEHASH"
-else
-    printf '  [WARN] %-34s unpinned (masterCopy=%s; --safe-codehash)\n' "Safe masterCopy EXTCODEHASH" "$safe_master"
-fi
+printf '  [INFO] %-34s %s\n' "Safe masterCopy (slot 0)" "$(lower "$safe_master")"
+check_codehash_pin "Safe masterCopy EXTCODEHASH" "$safe_master" "$EXPECTED_SAFE_CODEHASH" "--safe-codehash"
 
 check_iface() {
     local label="$1" id="$2"
@@ -285,8 +315,13 @@ if [[ -z "$snap" ]]; then
     printf '  [FAIL] %-34s call failed\n' "getConfigSnapshot(safe)"
     FAIL=1
 else
-    read -r snap_d snap_r snap_u snap_cnt snap_back \
-        < <(printf '%s\n' "$snap" | tr '\n' ' ' | tr -s ' ')
+    # One value per line; cast may append a "[8.64e4]" annotation to a line,
+    # stripped below with ${var%% *}. (Joining lines and `read`ing them would
+    # both misalign fields on annotations and, at EOF without a newline, make
+    # `read` return 1 and abort the script under `set -e`.)
+    mapfile -t snap_lines < <(printf '%s\n' "$snap")
+    snap_d="${snap_lines[0]:-}"; snap_r="${snap_lines[1]:-}"; snap_u="${snap_lines[2]:-}"
+    snap_cnt="${snap_lines[3]:-}"; snap_back="${snap_lines[4]:-}"
     snap_d_num=${snap_d%% *}
     snap_r_num=${snap_r%% *}
     snap_u_num=${snap_u%% *}
@@ -333,10 +368,20 @@ else
         FAIL=1
     fi
 
+    # signersCount == 0 is a valid contract state (SPEC_V1 H.15) but the Safe
+    # then has NO panic capability: triggerLockdown is unreachable. A green
+    # verify must mean "armed", so dormant FAILs unless explicitly accepted
+    # for the intermediate step of a staged install.
     if [[ "$snap_cnt_num" =~ ^[0-9]+$ ]] && [[ "$snap_cnt_num" -gt 0 ]]; then
         printf '  [OK]   %-34s %s registered\n' "signersCount" "$snap_cnt_num"
+    elif [[ "$snap_cnt_num" == "0" && "$ALLOW_DORMANT" -eq 1 ]]; then
+        printf '  [WARN] %-34s 0 - Safe is DORMANT (cannot lockdown); accepted by --allow-dormant\n' "signersCount"
+    elif [[ "$snap_cnt_num" == "0" ]]; then
+        printf '  [FAIL] %-34s 0 - Safe is DORMANT (cannot lockdown); register a signer, or pass --allow-dormant for a staged install\n' "signersCount"
+        FAIL=1
     else
-        printf '  [WARN] %-34s 0 - Safe is DORMANT (cannot lockdown)\n' "signersCount"
+        printf '  [FAIL] %-34s unreadable (%s)\n' "signersCount" "${snap_cnt_num:-none}"
+        FAIL=1
     fi
 fi
 
@@ -360,6 +405,118 @@ if [[ "$tl_delay_num" =~ ^[0-9]+$ ]] && [[ "$tl_delay_num" -gt 0 ]]; then
 else
     printf '  [WARN] %-34s 0 - NO coercion resistance: a quorum can remove the\n' "timelockDelay"
     printf '         %-34s guard or disarm signers instantly (INV-LIVE-1)\n' ""
+fi
+
+# SPEC_V1 H.27 (NM-1060 6.1): ERC-1271 is a per-Safe opt-in, disabled by
+# default. Allowed + timelockDelay > 0 re-opens the off-chain signing surface
+# that the timelock cannot gate, by operator choice: surface it loudly.
+erc1271=$(cast call "$SINGLETON" "isErc1271Allowed(address)(bool)" "$SAFE" --rpc-url "$RPC" 2>/dev/null || true)
+case "${erc1271%% *}" in
+    false)
+        printf '  [OK]   %-34s disabled (default, H.27): no off-chain signatures\n' "erc1271Allowed" ;;
+    true)
+        if [[ "${tl_delay_num:-0}" =~ ^[0-9]+$ ]] && [[ "${tl_delay_num:-0}" -gt 0 ]]; then
+            printf '  [WARN] %-34s true with timelockDelay > 0: off-chain signatures\n' "erc1271Allowed"
+            printf '         %-34s settle with no timelock window (NM-1060 6.1, operator choice)\n' ""
+        else
+            printf '  [OK]   %-34s true (operator opt-in, H.27)\n' "erc1271Allowed"
+        fi ;;
+    *)
+        printf '  [WARN] %-34s call failed (singleton predates H.27?)\n' "erc1271Allowed" ;;
+esac
+
+# Owners / threshold / enabled modules. The install batch must not change
+# any of them: a batch that also slips in addOwnerWithThreshold(attacker, 1)
+# or enableModule(attacker) would otherwise verify fully green. Compare against
+# the preflight snapshot when supplied; otherwise print and WARN.
+SENTINEL_MODULES="0x0000000000000000000000000000000000000001"
+ZERO_ADDRESS="0x0000000000000000000000000000000000000000"
+MODULE_PAGE_SIZE=100
+MODULE_MAX_PAGES=50
+
+# Prints every enabled module (lowercase, one per line) across all pages.
+# Non-zero exit if any page is unreadable, so a truncated list never passes.
+list_safe_modules() {
+    local start="$SENTINEL_MODULES" out first next page=0
+    while :; do
+        out=$(cast call "$SAFE" "getModulesPaginated(address,uint256)(address[],address)" \
+            "$start" "$MODULE_PAGE_SIZE" --rpc-url "$RPC" 2>/dev/null) || return 1
+        first=$(printf '%s\n' "$out" | sed -n '1p')
+        next=$(lower "$(printf '%s\n' "$out" | sed -n '2p')")
+        [[ "$first" == \[* ]] || return 1
+        printf '%s\n' "$first" | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' || true
+        if [[ -z "$next" || "$next" == "$SENTINEL_MODULES" || "$next" == "$ZERO_ADDRESS" ]]; then
+            return 0
+        fi
+        page=$((page + 1))
+        [[ "$page" -lt "$MODULE_MAX_PAGES" ]] || return 1
+        start="$next"
+    done
+}
+
+# Sorted, newline-separated, lowercase, blank lines dropped.
+canon_set() { printf '%s\n' "$1" | sed '/^$/d' | tr 'A-F' 'a-f' | LC_ALL=C sort; }
+join_set() { local v; v=$(canon_set "$1" | paste -sd, -); printf '%s' "${v:-none}"; }
+
+owners_line=$(cast call "$SAFE" "getOwners()(address[])" --rpc-url "$RPC" 2>/dev/null || true)
+cur_owners=$(printf '%s\n' "$owners_line" | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' || true)
+threshold_raw=$(cast call "$SAFE" "getThreshold()(uint256)" --rpc-url "$RPC" 2>/dev/null || true)
+cur_threshold=${threshold_raw%% *}
+modules_ok=1
+cur_modules=$(list_safe_modules) || modules_ok=0
+
+owners_ok=1
+[[ "$owners_line" == \[* && -n "$cur_owners" ]] || owners_ok=0
+threshold_ok=1
+[[ "$cur_threshold" =~ ^[0-9]+$ ]] || threshold_ok=0
+
+if [[ -n "$SNAPSHOT" ]]; then
+    snap_format=$(jq -r '.format // empty' "$SNAPSHOT" 2>/dev/null || true)
+    snap_safe=$(jq -r '.safe // empty' "$SNAPSHOT" 2>/dev/null || true)
+    snap_chain=$(jq -r '.chainId // empty' "$SNAPSHOT" 2>/dev/null || true)
+    snap_block=$(jq -r '.blockNumber // empty' "$SNAPSHOT" 2>/dev/null || true)
+    snap_threshold=$(jq -r '.threshold // empty' "$SNAPSHOT" 2>/dev/null || true)
+    snap_owners=$(jq -r '(.owners // empty)[]' "$SNAPSHOT" 2>/dev/null || true)
+    snap_modules_valid=$(jq -r 'if (.modules | type) == "array" then "yes" else "no" end' "$SNAPSHOT" 2>/dev/null || true)
+    snap_modules=$(jq -r '(.modules // [])[]' "$SNAPSHOT" 2>/dev/null || true)
+    live_chain=$(cast chain-id --rpc-url "$RPC" 2>/dev/null || true)
+
+    if [[ "$snap_format" != "runtime-capital.safe-lockdown.owner-module-snapshot.v1" \
+        || -z "$snap_owners" || ! "$snap_threshold" =~ ^[0-9]+$ || "$snap_modules_valid" != "yes" ]]; then
+        printf '  [FAIL] %-34s %s is not a valid preflight snapshot\n' "Owner/module snapshot" "$SNAPSHOT"; FAIL=1
+    elif [[ "$(lower "$snap_safe")" != "$SAFE_LC" || "$snap_chain" != "$live_chain" ]]; then
+        printf '  [FAIL] %-34s taken for safe=%s chain=%s, verifying safe=%s chain=%s\n' \
+            "Owner/module snapshot" "$(lower "$snap_safe")" "$snap_chain" "$SAFE_LC" "${live_chain:-?}"; FAIL=1
+    else
+        printf '  [INFO] %-34s %s (preflight block %s)\n' "Owner/module snapshot" "$SNAPSHOT" "$snap_block"
+        if [[ "$owners_ok" -ne 1 ]]; then
+            printf '  [FAIL] %-34s getOwners call failed\n' "Owners == snapshot"; FAIL=1
+        elif [[ "$(canon_set "$cur_owners")" == "$(canon_set "$snap_owners")" ]]; then
+            printf '  [OK]   %-34s %s\n' "Owners == snapshot" "$(join_set "$cur_owners")"
+        else
+            printf '  [FAIL] %-34s actual=%s expected=%s\n' "Owners == snapshot" "$(join_set "$cur_owners")" "$(join_set "$snap_owners")"; FAIL=1
+        fi
+        if [[ "$threshold_ok" -ne 1 ]]; then
+            printf '  [FAIL] %-34s getThreshold call failed\n' "Threshold == snapshot"; FAIL=1
+        elif [[ "$cur_threshold" == "$snap_threshold" ]]; then
+            printf '  [OK]   %-34s %s\n' "Threshold == snapshot" "$cur_threshold"
+        else
+            printf '  [FAIL] %-34s actual=%s expected=%s\n' "Threshold == snapshot" "$cur_threshold" "$snap_threshold"; FAIL=1
+        fi
+        if [[ "$modules_ok" -ne 1 ]]; then
+            printf '  [FAIL] %-34s getModulesPaginated call failed\n' "Enabled modules == snapshot"; FAIL=1
+        elif [[ "$(canon_set "$cur_modules")" == "$(canon_set "$snap_modules")" ]]; then
+            printf '  [OK]   %-34s %s\n' "Enabled modules == snapshot" "$(join_set "$cur_modules")"
+        else
+            printf '  [FAIL] %-34s actual=%s expected=%s\n' "Enabled modules == snapshot" "$(join_set "$cur_modules")" "$(join_set "$snap_modules")"; FAIL=1
+        fi
+    fi
+else
+    printf '  [INFO] %-34s %s\n' "Owners" "$( [[ "$owners_ok" -eq 1 ]] && join_set "$cur_owners" || echo 'getOwners call failed')"
+    printf '  [INFO] %-34s %s\n' "Threshold" "$( [[ "$threshold_ok" -eq 1 ]] && echo "$cur_threshold" || echo 'getThreshold call failed')"
+    printf '  [INFO] %-34s %s\n' "Enabled modules" "$( [[ "$modules_ok" -eq 1 ]] && join_set "$cur_modules" || echo 'getModulesPaginated call failed')"
+    printf '  [WARN] %-34s owners/threshold/modules NOT compared - pass --snapshot from preflight\n' "Owner/module snapshot"
+    printf '         %-34s (or check them by hand against the pre-install values)\n' ""
 fi
 
 echo

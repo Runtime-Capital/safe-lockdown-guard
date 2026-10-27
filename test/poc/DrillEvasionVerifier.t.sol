@@ -9,6 +9,7 @@ import {Safe} from "@safe-global/safe-smart-account/Safe.sol";
 
 import {Lockdown} from "../../src/Lockdown.sol";
 import {StateMachine} from "../../src/base/StateMachine.sol";
+import {DrillSigner} from "../../script/DrillSigner.s.sol";
 
 /// @dev Ordering probe: it returns magic only while its identity is not burnt.
 ///      Production verifiers are restricted by operator policy to the pinned,
@@ -70,8 +71,9 @@ contract VerifyBeforeBurnRegression is TestEnvironment {
         guard.addLockdownSigner(signer_);
     }
 
-    function test_regression_testSignerObservesPreBurnState() public view {
-        assertTrue(guard.testSigner(signer, bytes32("drill-hash"), bytes("proof")), "drill says ready");
+    function test_regression_offChainDrillObservesPreBurnState() public {
+        DrillSigner drill = new DrillSigner();
+        assertTrue(drill.isValid(guard, address(safe), REASON, signer, bytes("proof")), "drill says ready");
         assertTrue(guard.isLockdownSigner(address(safe), signer), "identity registered during drill");
         assertFalse(guard.isSignerBurntPermanently(address(safe), signer), "identity not burnt during drill");
     }
