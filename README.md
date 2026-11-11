@@ -8,9 +8,20 @@ upgradeability, and no path for anyone, including us, to touch another party's S
 Each Safe keeps full custody, sets its own configuration, and can walk away at any
 time.
 
-> **Not audited yet.** An external audit is the only remaining step before v1.0.0.
-> Do not install this on a Safe holding value until that audit is complete and
-> published.
+> **Audited by Nethermind Security** (NM-1060). The audited release is the tag
+> [`v1.0.0-audit-nethermind`](https://github.com/Runtime-Capital/safe-lockdown-guard/releases/tag/v1.0.0-audit-nethermind).
+> The report will be published in this repository.
+
+## Two ways to use it
+
+- **Run it yourself.** Everything is in this repository, MIT-licensed: point your
+  Safe at the singleton, configure your panic signers, timelock and recovery, and run
+  your own trigger and execution.
+- **Use Runtime Guard.** [Kidnapping Guard at runtime-guard.io](https://www.runtime-guard.io/kidnapping-guard/)
+  sets this guard up on your Safe in one transaction, gives your panic signers
+  ready-made triggers (a passkey, a Ledger or Rabby wallet, a Home Assistant button),
+  runs the relayers that freeze and execute for you, and publishes the public status
+  page that proves a Safe is frozen. Built and used by Runtime Capital. No KYC.
 
 ## The problem: the $5 wrench attack
 
