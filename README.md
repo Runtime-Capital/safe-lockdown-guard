@@ -91,7 +91,7 @@ freeze.
 
 ## Status
 
-v1.0.0 audit candidate, scope-locked. Not deployed to mainnet.
+v1.0.0, audited by Nethermind Security (NM-1060), tag `v1.0.0-audit-nethermind`. Ethereum mainnet deployment in progress.
 
 | | |
 |---|---|
